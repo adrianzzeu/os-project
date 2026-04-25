@@ -171,7 +171,7 @@ int ensure_directory(const char *path, mode_t mode)
 
 int ensure_storage_layout(void)
 {
-    return ensure_directory(CM_DATA_DIR, CM_DISTRICT_MODE);
+    return 0;
 }
 
 int validate_name(const char *name, const char *label)
@@ -204,7 +204,7 @@ int build_district_dir(const char *district, char *buf, size_t buflen)
         return -1;
     }
 
-    written = snprintf(buf, buflen, "%s/%s", CM_DATA_DIR, district);
+    written = snprintf(buf, buflen, "%s", district);
     if (written < 0 || (size_t)written >= buflen) {
         cm_error("district path is too long for %s\n", district);
         return -1;
@@ -373,8 +373,7 @@ int ensure_district_layout(const char *district)
     char log_path[PATH_MAX];
     struct stat st;
 
-    if (ensure_storage_layout() == -1 ||
-        build_district_dir(district, dir, sizeof(dir)) == -1) {
+    if (build_district_dir(district, dir, sizeof(dir)) == -1) {
         return -1;
     }
 
@@ -555,8 +554,7 @@ int update_active_report_symlink(const char *district)
 
     written = snprintf(target,
                        sizeof(target),
-                       "%s/%s/%s",
-                       CM_DATA_DIR,
+                       "%s/%s",
                        district,
                        CM_REPORT_FILE);
     if (written < 0 || (size_t)written >= sizeof(target)) {
@@ -707,9 +705,7 @@ int append_district_log(const char *district,
                         const char *action)
 {
     char log_path[PATH_MAX];
-    char timestamp[32];
     time_t now = time(NULL);
-    struct tm tm_value;
     int fd;
 
     if (ensure_district_layout(district) == -1 ||
@@ -722,12 +718,6 @@ int append_district_log(const char *district,
         return -1;
     }
 
-    if (localtime_r(&now, &tm_value) == NULL) {
-        snprintf(timestamp, sizeof(timestamp), "unknown");
-    } else {
-        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_value);
-    }
-
     fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, CM_LOG_MODE);
     if (fd == -1) {
         cm_errno(log_path);
@@ -735,10 +725,10 @@ int append_district_log(const char *district,
     }
 
     if (cm_writef(fd,
-                  "%s role=%s user=%s action=%s\n",
-                  timestamp,
-                  role == NULL ? "unknown" : role,
+                  "%lld %s %s %s\n",
+                  (long long)now,
                   user == NULL ? "unknown" : user,
+                  role == NULL ? "unknown" : role,
                   action == NULL ? "unknown" : action) == -1 ||
         fsync(fd) == -1) {
         cm_errno(log_path);

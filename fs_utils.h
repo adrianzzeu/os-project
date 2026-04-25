@@ -4,7 +4,6 @@
 #include <stddef.h>
 #include <sys/stat.h>
 
-#define CM_DATA_DIR "data"
 #define CM_REPORT_FILE "reports.dat"
 #define CM_CONFIG_FILE "district.cfg"
 #define CM_LOG_FILE "logged_district"

@@ -20,8 +20,8 @@ system-call-oriented.
 - I added listing, showing, metadata display, and report filtering.
 - I added a `build.sh` script so the project can be compiled into the
   `city_manager` executable.
-- I changed the storage layout so each district has its own directory under
-  `data/`.
+- I changed the storage layout so each district has its own directory directly
+  under the project folder, such as `./downtown/`.
 - I added the required district files:
   `reports.dat`, `district.cfg`, and `logged_district`.
 - I updated the binary report records to store report ID, inspector name from
@@ -35,6 +35,8 @@ system-call-oriented.
   reports print an escalation alert when they meet the threshold.
 - I added operation logging so successful actions write the timestamp, declared
   role, declared user, and action into `logged_district`.
+- I adjusted `logged_district` entries to a simple terminal-friendly format:
+  epoch timestamp, user, role, then action.
 - I added the permission-bit simulation required by the assignment:
   district directories use `750`, `reports.dat` uses `664`, `district.cfg`
   uses `640`, and `logged_district` uses `644`.
@@ -57,7 +59,7 @@ system-call-oriented.
 - I added support for filtering by `severity`, `category`, `inspector`, and
   `timestamp`, with operators `=`, `==`, `!=`, `<`, `<=`, `>`, and `>=`.
 - I added root-level `active_reports-<district>` symbolic links pointing to
-  `data/<district>/reports.dat`.
+  `<district>/reports.dat`.
 - I used `lstat()` when checking symlinks and added warnings for dangling
   `active_reports-*` links instead of crashing.
 
@@ -80,6 +82,9 @@ system-call-oriented.
 - AI helped me notice that my first binary-file layout had extra metadata before
   record 0, and I adjusted the implementation so record offsets now match
   `report_index * sizeof(Report)`.
+- AI helped me compare my terminal behavior against the sample output, and I
+  adjusted the directory layout and interactive add prompts myself to match it
+  more closely.
 - I implemented the permission-bit simulation mostly myself, with only a small
   amount of AI help to check edge cases like exact `district.cfg` permissions,
   symbolic permission output, and physical record deletion.
@@ -107,6 +112,9 @@ system-call-oriented.
   then used AI for small implementation checks while I made the changes.
 - I gave the exact Phase 1 filter and symbolic-link requirements, then used AI
   mainly to help review the required function shapes and edge cases.
+- I showed AI sample terminal output and used it as guidance while I updated
+  `--add` to prompt for missing latitude, longitude, category, severity, and
+  description fields.
 - I corrected the AI usage wording so it reflects that I did the project and AI
   only gave guidance where I needed it.
 - Most of the direction came from me; AI was mainly used for small checks,
@@ -122,7 +130,7 @@ system-call-oriented.
 - The program has been tested with add, list, show, metadata, filter, threshold
   update, inspector denial, manager removal, root symbolic link creation, and
   dangling symbolic link warnings.
-- Generated runtime data is stored under `data/DISTRICT/` and can be recreated
+- Generated runtime data is stored under `./DISTRICT/` and can be recreated
   by running the program.
 
 ### Next steps

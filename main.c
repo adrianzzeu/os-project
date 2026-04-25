@@ -32,6 +32,15 @@ int set_command(Command *command, Command next);
 int copy_option(char *dest, size_t dest_size, const char *value, const char *name);
 int parse_double_arg(const char *text, double *value);
 int parse_severity_arg(const char *text, int *severity);
+int read_prompt_line(const char *prompt, char *buf, size_t buflen);
+int prompt_double_arg(const char *prompt, double *value);
+int prompt_severity_arg(const char *prompt, int *severity);
+int prompt_add_input(ReportInput *input,
+                     int has_latitude,
+                     int has_longitude,
+                     int has_category,
+                     int has_severity,
+                     int has_description);
 int authorize(Role role, Command command);
 int log_success(const char *district,
                 Role role,
@@ -50,7 +59,8 @@ void usage(int fd)
                   "  city_manager --role inspector|manager --user USER --filter DISTRICT CONDITION...\n"
                   "  city_manager --role inspector|manager --user USER --metadata DISTRICT\n"
                   "\n"
-                  "Each district is stored under data/DISTRICT/ with reports.dat, district.cfg, and logged_district.\n"
+                  "Each district is stored under ./DISTRICT/ with reports.dat, district.cfg, and logged_district.\n"
+                  "When --add fields are omitted, the program prompts for them interactively.\n"
                   "Filter examples: 'severity:>=2' 'category:==road' or severity>=2,category=road\n");
 }
 
@@ -135,6 +145,145 @@ int parse_severity_arg(const char *text, int *severity)
     return 0;
 }
 
+int read_prompt_line(const char *prompt, char *buf, size_t buflen)
+{
+    size_t len = 0;
+
+    if (buflen == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    if (cm_write_all(STDOUT_FILENO, prompt, strlen(prompt)) == -1) {
+        cm_errno("write prompt");
+        return -1;
+    }
+
+    for (;;) {
+        char ch;
+        ssize_t nread = read(STDIN_FILENO, &ch, 1);
+
+        if (nread == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            cm_errno("read prompt");
+            return -1;
+        }
+        if (nread == 0) {
+            if (len == 0) {
+                cm_error("missing input for prompt: %s\n", prompt);
+                return -1;
+            }
+            break;
+        }
+        if (ch == '\n') {
+            break;
+        }
+        if (ch == '\r') {
+            continue;
+        }
+        if (len + 1 >= buflen) {
+            cm_error("input is too long for prompt: %s\n", prompt);
+            return -1;
+        }
+
+        buf[len++] = ch;
+    }
+
+    buf[len] = '\0';
+    return 0;
+}
+
+int prompt_double_arg(const char *prompt, double *value)
+{
+    char buffer[128];
+
+    for (;;) {
+        if (read_prompt_line(prompt, buffer, sizeof(buffer)) == -1) {
+            return -1;
+        }
+        if (parse_double_arg(buffer, value) == 0) {
+            return 0;
+        }
+
+        cm_error("expected a floating-point number\n");
+        if (!isatty(STDIN_FILENO)) {
+            return -1;
+        }
+    }
+}
+
+int prompt_severity_arg(const char *prompt, int *severity)
+{
+    char buffer[32];
+
+    for (;;) {
+        if (read_prompt_line(prompt, buffer, sizeof(buffer)) == -1) {
+            return -1;
+        }
+        if (parse_severity_arg(buffer, severity) == 0) {
+            return 0;
+        }
+
+        cm_error("severity must be 1, 2, or 3\n");
+        if (!isatty(STDIN_FILENO)) {
+            return -1;
+        }
+    }
+}
+
+int prompt_add_input(ReportInput *input,
+                     int has_latitude,
+                     int has_longitude,
+                     int has_category,
+                     int has_severity,
+                     int has_description)
+{
+    char buffer[REPORT_DESCRIPTION_LEN];
+
+    if (!has_latitude && prompt_double_arg("Latitude: ", &input->latitude) == -1) {
+        return -1;
+    }
+    if (!has_longitude && prompt_double_arg("Longitude: ", &input->longitude) == -1) {
+        return -1;
+    }
+    if (!has_category) {
+        for (;;) {
+            if (read_prompt_line("Category (road/lighting/flooding/other): ",
+                                 buffer,
+                                 sizeof(buffer)) == -1) {
+                return -1;
+            }
+            if (validate_name(buffer, "category") == 0 &&
+                copy_option(input->category,
+                            sizeof(input->category),
+                            buffer,
+                            "category") == 0) {
+                break;
+            }
+            if (!isatty(STDIN_FILENO)) {
+                return -1;
+            }
+        }
+    }
+    if (!has_severity &&
+        prompt_severity_arg("Severity level (1/2/3): ", &input->severity) == -1) {
+        return -1;
+    }
+    if (!has_description) {
+        if (read_prompt_line("Description: ", buffer, sizeof(buffer)) == -1 ||
+            copy_option(input->description,
+                        sizeof(input->description),
+                        buffer,
+                        "description") == -1) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 int authorize(Role role, Command command)
 {
     if (role == ROLE_UNKNOWN) {
@@ -182,6 +331,11 @@ int main(int argc, char **argv)
     int result;
     char action[256];
     unsigned int created_id = 0;
+    int has_latitude = 0;
+    int has_longitude = 0;
+    int has_category = 0;
+    int has_severity = 0;
+    int has_description = 0;
 
     report_input_defaults(&input);
     report_filter_defaults(&filter);
@@ -280,12 +434,14 @@ int main(int argc, char **argv)
                 cm_error("--lat must be a floating-point number\n");
                 return 2;
             }
+            has_latitude = 1;
         } else if (strcmp(argv[i], "--lon") == 0) {
             if (need_arg(argc, argv, i, "--lon") == -1 ||
                 parse_double_arg(argv[++i], &input.longitude) == -1) {
                 cm_error("--lon must be a floating-point number\n");
                 return 2;
             }
+            has_longitude = 1;
         } else if (strcmp(argv[i], "--category") == 0) {
             if (need_arg(argc, argv, i, "--category") == -1) {
                 return 2;
@@ -297,6 +453,7 @@ int main(int argc, char **argv)
                             "--category") == -1) {
                 return 2;
             }
+            has_category = 1;
         } else if (strcmp(argv[i], "--description") == 0) {
             if (need_arg(argc, argv, i, "--description") == -1) {
                 return 2;
@@ -307,12 +464,14 @@ int main(int argc, char **argv)
                             "--description") == -1) {
                 return 2;
             }
+            has_description = 1;
         } else if (strcmp(argv[i], "--severity") == 0) {
             if (need_arg(argc, argv, i, "--severity") == -1 ||
                 parse_severity_arg(argv[++i], &input.severity) == -1) {
                 cm_error("--severity must be 1, 2, or 3\n");
                 return 2;
             }
+            has_severity = 1;
         } else if (strcmp(argv[i], "--filter") == 0) {
             if (command == CMD_LIST) {
                 if (need_arg(argc, argv, i, "--filter") == -1) {
@@ -369,6 +528,14 @@ int main(int argc, char **argv)
                         sizeof(input.inspector),
                         declared_user,
                         "--user") == -1) {
+            return 2;
+        }
+        if (prompt_add_input(&input,
+                             has_latitude,
+                             has_longitude,
+                             has_category,
+                             has_severity,
+                             has_description) == -1) {
             return 2;
         }
     }
