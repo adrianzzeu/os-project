@@ -116,25 +116,25 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
 
     *fd = open(path, flags, 0640);
     if (*fd == -1) {
-        perror(path);
+        cm_errno(path);
         return -1;
     }
 
     if (fchmod(*fd, 0640) == -1) {
-        perror(path);
+        cm_errno(path);
         close(*fd);
         return -1;
     }
 
     if (fstat(*fd, &st) == -1) {
-        perror(path);
+        cm_errno(path);
         close(*fd);
         return -1;
     }
 
     if (st.st_size == 0) {
         if (!create) {
-            fprintf(stderr, "report store for %s does not exist\n", district);
+            cm_error("report store for %s does not exist\n", district);
             close(*fd);
             return -1;
         }
@@ -146,25 +146,25 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         header->next_id = 1;
 
         if (write_all_at(*fd, header, sizeof(*header), 0) == -1) {
-            perror(path);
+            cm_errno(path);
             close(*fd);
             return -1;
         }
     } else {
         if ((size_t)st.st_size < sizeof(*header)) {
-            fprintf(stderr, "%s is too small to be a report store\n", path);
+            cm_error("%s is too small to be a report store\n", path);
             close(*fd);
             return -1;
         }
         if (read_all_at(*fd, header, sizeof(*header), 0) == -1) {
-            perror(path);
+            cm_errno(path);
             close(*fd);
             return -1;
         }
         if (memcmp(header->magic, REPORT_MAGIC, sizeof(header->magic)) != 0 ||
             header->version != REPORT_STORE_VERSION ||
             header->record_size != sizeof(ReportRecord)) {
-            fprintf(stderr, "%s has an incompatible report-store format\n", path);
+            cm_error("%s has an incompatible report-store format\n", path);
             close(*fd);
             return -1;
         }
@@ -333,19 +333,19 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
 
         if (strncmp(part, "severity>=", 10) == 0) {
             if (parse_int_value(part + 10, &value) == -1) {
-                fprintf(stderr, "invalid severity filter: %s\n", part);
+                cm_error("invalid severity filter: %s\n", part);
                 return -1;
             }
             filter->min_severity = value;
         } else if (strncmp(part, "severity<=", 10) == 0) {
             if (parse_int_value(part + 10, &value) == -1) {
-                fprintf(stderr, "invalid severity filter: %s\n", part);
+                cm_error("invalid severity filter: %s\n", part);
                 return -1;
             }
             filter->max_severity = value;
         } else if (strncmp(part, "severity=", 9) == 0) {
             if (parse_int_value(part + 9, &value) == -1) {
-                fprintf(stderr, "invalid severity filter: %s\n", part);
+                cm_error("invalid severity filter: %s\n", part);
                 return -1;
             }
             filter->min_severity = value;
@@ -357,7 +357,7 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
         } else if (strncmp(part, "id=", 3) == 0) {
             unsigned int parsed;
             if (parse_u32(part + 3, &parsed) == -1) {
-                fprintf(stderr, "invalid id filter: %s\n", part);
+                cm_error("invalid id filter: %s\n", part);
                 return -1;
             }
             filter->id = parsed;
@@ -374,11 +374,11 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
                        strcmp(active_value, "no") == 0) {
                 filter->active = 0;
             } else {
-                fprintf(stderr, "invalid active filter: %s\n", part);
+                cm_error("invalid active filter: %s\n", part);
                 return -1;
             }
         } else {
-            fprintf(stderr, "unknown filter term: %s\n", part);
+            cm_error("unknown filter term: %s\n", part);
             return -1;
         }
     }
@@ -411,7 +411,7 @@ int add_report(const char *district, const ReportInput *input)
 
     offset = lseek(fd, 0, SEEK_END);
     if (offset == (off_t)-1) {
-        perror("lseek");
+        cm_errno("lseek");
         close(fd);
         return -1;
     }
@@ -419,7 +419,7 @@ int add_report(const char *district, const ReportInput *input)
     if (write_all_at(fd, &record, sizeof(record), offset) == -1 ||
         write_all_at(fd, &header, sizeof(header), 0) == -1 ||
         fsync(fd) == -1) {
-        perror("write report");
+        cm_errno("write report");
         close(fd);
         return -1;
     }
@@ -427,11 +427,12 @@ int add_report(const char *district, const ReportInput *input)
     close(fd);
 
     format_timestamp(record.created_at, created, sizeof(created));
-    printf("Added report %u for %s\n", record.id, district);
-    printf("Status: %s | Severity: %d | Created: %s\n",
-           record.status,
-           record.severity,
-           created);
+    cm_writef(STDOUT_FILENO, "Added report %u for %s\n", record.id, district);
+    cm_writef(STDOUT_FILENO,
+              "Status: %s | Severity: %d | Created: %s\n",
+              record.status,
+              record.severity,
+              created);
     return 0;
 }
 
@@ -455,7 +456,7 @@ int remove_report(const char *district, unsigned int id)
                 offset -= (off_t)sizeof(record);
                 continue;
             }
-            perror("read report");
+            cm_errno("read report");
             close(fd);
             return -1;
         }
@@ -463,7 +464,7 @@ int remove_report(const char *district, unsigned int id)
             break;
         }
         if ((size_t)nread != sizeof(record)) {
-            fprintf(stderr, "report store ended with a partial record\n");
+            cm_error("report store ended with a partial record\n");
             close(fd);
             return -1;
         }
@@ -471,7 +472,10 @@ int remove_report(const char *district, unsigned int id)
         if (record.id == id) {
             found = 1;
             if (!record.active) {
-                printf("Report %u in %s is already removed\n", id, district);
+                cm_writef(STDOUT_FILENO,
+                          "Report %u in %s is already removed\n",
+                          id,
+                          district);
                 close(fd);
                 return 0;
             }
@@ -481,12 +485,12 @@ int remove_report(const char *district, unsigned int id)
 
             if (write_all_at(fd, &record, sizeof(record), offset) == -1 ||
                 fsync(fd) == -1) {
-                perror("remove report");
+                cm_errno("remove report");
                 close(fd);
                 return -1;
             }
 
-            printf("Removed report %u from %s\n", id, district);
+            cm_writef(STDOUT_FILENO, "Removed report %u from %s\n", id, district);
             close(fd);
             return 0;
         }
@@ -495,7 +499,7 @@ int remove_report(const char *district, unsigned int id)
     close(fd);
 
     if (!found) {
-        fprintf(stderr, "report %u was not found in %s\n", id, district);
+        cm_error("report %u was not found in %s\n", id, district);
         return -1;
     }
 
@@ -514,7 +518,13 @@ int list_reports(const char *district, const ReportFilter *filter)
         return -1;
     }
 
-    printf("%-5s %-8s %-7s %-19s %s\n", "ID", "Severity", "Active", "Created", "Title");
+    cm_writef(STDOUT_FILENO,
+              "%-5s %-8s %-7s %-19s %s\n",
+              "ID",
+              "Severity",
+              "Active",
+              "Created",
+              "Title");
     for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
         char created[32];
@@ -524,7 +534,7 @@ int list_reports(const char *district, const ReportFilter *filter)
                 offset -= (off_t)sizeof(record);
                 continue;
             }
-            perror("read report");
+            cm_errno("read report");
             close(fd);
             return -1;
         }
@@ -532,7 +542,7 @@ int list_reports(const char *district, const ReportFilter *filter)
             break;
         }
         if ((size_t)nread != sizeof(record)) {
-            fprintf(stderr, "report store ended with a partial record\n");
+            cm_error("report store ended with a partial record\n");
             close(fd);
             return -1;
         }
@@ -542,17 +552,18 @@ int list_reports(const char *district, const ReportFilter *filter)
         }
 
         format_timestamp(record.created_at, created, sizeof(created));
-        printf("%-5u %-8d %-7s %-19s %s\n",
-               record.id,
-               record.severity,
-               record.active ? "yes" : "no",
-               created,
-               record.title);
+        cm_writef(STDOUT_FILENO,
+                  "%-5u %-8d %-7s %-19s %s\n",
+                  record.id,
+                  record.severity,
+                  record.active ? "yes" : "no",
+                  created,
+                  record.title);
         matches++;
     }
 
     close(fd);
-    printf("%d report(s)\n", matches);
+    cm_writef(STDOUT_FILENO, "%d report(s)\n", matches);
     return 0;
 }
 
@@ -580,7 +591,7 @@ int show_report(const char *district, unsigned int id)
                 offset -= (off_t)sizeof(record);
                 continue;
             }
-            perror("read report");
+            cm_errno("read report");
             close(fd);
             return -1;
         }
@@ -588,7 +599,7 @@ int show_report(const char *district, unsigned int id)
             break;
         }
         if ((size_t)nread != sizeof(record)) {
-            fprintf(stderr, "report store ended with a partial record\n");
+            cm_error("report store ended with a partial record\n");
             close(fd);
             return -1;
         }
@@ -599,21 +610,21 @@ int show_report(const char *district, unsigned int id)
 
             format_timestamp(record.created_at, created, sizeof(created));
             format_timestamp(record.updated_at, updated, sizeof(updated));
-            printf("ID: %u\n", record.id);
-            printf("District: %s\n", record.district);
-            printf("Title: %s\n", record.title);
-            printf("Description: %s\n", record.description);
-            printf("Status: %s\n", record.status);
-            printf("Severity: %d\n", record.severity);
-            printf("Active: %s\n", record.active ? "yes" : "no");
-            printf("Created: %s\n", created);
-            printf("Updated: %s\n", updated);
+            cm_writef(STDOUT_FILENO, "ID: %u\n", record.id);
+            cm_writef(STDOUT_FILENO, "District: %s\n", record.district);
+            cm_writef(STDOUT_FILENO, "Title: %s\n", record.title);
+            cm_writef(STDOUT_FILENO, "Description: %s\n", record.description);
+            cm_writef(STDOUT_FILENO, "Status: %s\n", record.status);
+            cm_writef(STDOUT_FILENO, "Severity: %d\n", record.severity);
+            cm_writef(STDOUT_FILENO, "Active: %s\n", record.active ? "yes" : "no");
+            cm_writef(STDOUT_FILENO, "Created: %s\n", created);
+            cm_writef(STDOUT_FILENO, "Updated: %s\n", updated);
             close(fd);
             return 0;
         }
     }
 
     close(fd);
-    fprintf(stderr, "report %u was not found in %s\n", id, district);
+    cm_error("report %u was not found in %s\n", id, district);
     return -1;
 }

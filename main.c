@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef enum Role {
     ROLE_UNKNOWN = 0,
@@ -20,7 +21,7 @@ typedef enum Command {
     CMD_METADATA
 } Command;
 
-void usage(FILE *stream);
+void usage(int fd);
 Role parse_role(const char *text);
 const char *role_name(Role role);
 int need_arg(int argc, char **argv, int index, const char *option);
@@ -28,17 +29,17 @@ int set_command(Command *command, Command next);
 int copy_option(char *dest, size_t dest_size, const char *value, const char *name);
 int authorize(Role role, Command command);
 
-void usage(FILE *stream)
+void usage(int fd)
 {
-    fprintf(stream,
-            "Usage:\n"
-            "  city_manager --role inspector --add DISTRICT [--title TEXT] [--description TEXT] [--severity N] [--status TEXT]\n"
-            "  city_manager --role manager --remove_report DISTRICT ID\n"
-            "  city_manager --role inspector|manager --list DISTRICT [--filter EXPR]\n"
-            "  city_manager --role inspector|manager --show DISTRICT ID\n"
-            "  city_manager --role inspector|manager --metadata DISTRICT\n"
-            "\n"
-            "Filter terms are comma separated: severity>=3,status=open,text=bridge,active=all\n");
+    cm_write_text(fd,
+                  "Usage:\n"
+                  "  city_manager --role inspector --add DISTRICT [--title TEXT] [--description TEXT] [--severity N] [--status TEXT]\n"
+                  "  city_manager --role manager --remove_report DISTRICT ID\n"
+                  "  city_manager --role inspector|manager --list DISTRICT [--filter EXPR]\n"
+                  "  city_manager --role inspector|manager --show DISTRICT ID\n"
+                  "  city_manager --role inspector|manager --metadata DISTRICT\n"
+                  "\n"
+                  "Filter terms are comma separated: severity>=3,status=open,text=bridge,active=all\n");
 }
 
 Role parse_role(const char *text)
@@ -67,11 +68,11 @@ const char *role_name(Role role)
 int need_arg(int argc, char **argv, int index, const char *option)
 {
     if (index + 1 >= argc) {
-        fprintf(stderr, "%s requires an argument\n", option);
+        cm_error("%s requires an argument\n", option);
         return -1;
     }
     if (strncmp(argv[index + 1], "--", 2) == 0) {
-        fprintf(stderr, "%s requires an argument\n", option);
+        cm_error("%s requires an argument\n", option);
         return -1;
     }
     return 0;
@@ -80,7 +81,7 @@ int need_arg(int argc, char **argv, int index, const char *option)
 int set_command(Command *command, Command next)
 {
     if (*command != CMD_UNKNOWN) {
-        fprintf(stderr, "only one command may be used per invocation\n");
+        cm_error("only one command may be used per invocation\n");
         return -1;
     }
     *command = next;
@@ -91,7 +92,7 @@ int copy_option(char *dest, size_t dest_size, const char *value, const char *nam
 {
     int written = snprintf(dest, dest_size, "%s", value);
     if (written < 0 || (size_t)written >= dest_size) {
-        fprintf(stderr, "%s is too long\n", name);
+        cm_error("%s is too long\n", name);
         return -1;
     }
     return 0;
@@ -100,17 +101,17 @@ int copy_option(char *dest, size_t dest_size, const char *value, const char *nam
 int authorize(Role role, Command command)
 {
     if (role == ROLE_UNKNOWN) {
-        fprintf(stderr, "a valid --role is required: inspector or manager\n");
+        cm_error("a valid --role is required: inspector or manager\n");
         return -1;
     }
 
     if (command == CMD_ADD && role != ROLE_INSPECTOR) {
-        fprintf(stderr, "permission denied: --add requires role inspector\n");
+        cm_error("permission denied: --add requires role inspector\n");
         return -1;
     }
 
     if (command == CMD_REMOVE_REPORT && role != ROLE_MANAGER) {
-        fprintf(stderr, "permission denied: --remove_report requires role manager\n");
+        cm_error("permission denied: --remove_report requires role manager\n");
         return -1;
     }
 
@@ -132,13 +133,13 @@ int main(int argc, char **argv)
     report_filter_defaults(&filter);
 
     if (argc == 1) {
-        usage(stderr);
+        usage(STDERR_FILENO);
         return 2;
     }
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0) {
-            usage(stdout);
+            usage(STDOUT_FILENO);
             return 0;
         } else if (strcmp(argv[i], "--role") == 0) {
             if (need_arg(argc, argv, i, "--role") == -1) {
@@ -146,7 +147,7 @@ int main(int argc, char **argv)
             }
             role = parse_role(argv[++i]);
             if (role == ROLE_UNKNOWN) {
-                fprintf(stderr, "unknown role: %s\n", argv[i]);
+                cm_error("unknown role: %s\n", argv[i]);
                 return 2;
             }
         } else if (strcmp(argv[i], "--add") == 0) {
@@ -165,7 +166,7 @@ int main(int argc, char **argv)
                 return 2;
             }
             if (parse_u32(argv[++i], &id) == -1 || id == 0) {
-                fprintf(stderr, "report id must be a positive integer\n");
+                cm_error("report id must be a positive integer\n");
                 return 2;
             }
         } else if (strcmp(argv[i], "--list") == 0) {
@@ -184,7 +185,7 @@ int main(int argc, char **argv)
                 return 2;
             }
             if (parse_u32(argv[++i], &id) == -1 || id == 0) {
-                fprintf(stderr, "report id must be a positive integer\n");
+                cm_error("report id must be a positive integer\n");
                 return 2;
             }
         } else if (strcmp(argv[i], "--metadata") == 0) {
@@ -226,7 +227,7 @@ int main(int argc, char **argv)
                 return 2;
             }
             if (parse_u32(argv[++i], &parsed) == -1 || parsed > 5) {
-                fprintf(stderr, "--severity must be an integer from 0 to 5\n");
+                cm_error("--severity must be an integer from 0 to 5\n");
                 return 2;
             }
             input.severity = (int)parsed;
@@ -236,14 +237,14 @@ int main(int argc, char **argv)
             }
             filter_expression = argv[++i];
         } else {
-            fprintf(stderr, "unknown option: %s\n", argv[i]);
-            usage(stderr);
+            cm_error("unknown option: %s\n", argv[i]);
+            usage(STDERR_FILENO);
             return 2;
         }
     }
 
     if (command == CMD_UNKNOWN || district == NULL) {
-        usage(stderr);
+        usage(STDERR_FILENO);
         return 2;
     }
 
@@ -260,7 +261,7 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    printf("Role: %s\n", role_name(role));
+    cm_writef(STDOUT_FILENO, "Role: %s\n", role_name(role));
 
     switch (command) {
     case CMD_ADD:
@@ -274,7 +275,7 @@ int main(int argc, char **argv)
     case CMD_METADATA:
         return print_file_metadata(district) == 0 ? 0 : 1;
     default:
-        usage(stderr);
+        usage(STDERR_FILENO);
         return 2;
     }
 }
