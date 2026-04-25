@@ -2,6 +2,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -9,6 +10,11 @@
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+int write_default_config(const char *path);
+int create_empty_log(const char *path);
+int print_stat_entry(const char *label, const char *path, int use_lstat);
+int parse_threshold_value(const char *text, int *threshold);
 
 int cm_write_all(int fd, const char *buf, size_t count)
 {
@@ -158,16 +164,7 @@ int ensure_directory(const char *path, mode_t mode)
 
 int ensure_storage_layout(void)
 {
-    if (ensure_directory(CM_DATA_DIR, 0750) == -1) {
-        return -1;
-    }
-    if (ensure_directory(CM_REPORT_DIR, 0750) == -1) {
-        return -1;
-    }
-    if (ensure_directory(CM_LATEST_DIR, 0750) == -1) {
-        return -1;
-    }
-    return 0;
+    return ensure_directory(CM_DATA_DIR, 0750);
 }
 
 int validate_name(const char *name, const char *label)
@@ -192,7 +189,7 @@ int validate_name(const char *name, const char *label)
     return 0;
 }
 
-int build_report_path(const char *district, char *buf, size_t buflen)
+int build_district_dir(const char *district, char *buf, size_t buflen)
 {
     int written;
 
@@ -200,9 +197,63 @@ int build_report_path(const char *district, char *buf, size_t buflen)
         return -1;
     }
 
-    written = snprintf(buf, buflen, "%s/%s.bin", CM_REPORT_DIR, district);
+    written = snprintf(buf, buflen, "%s/%s", CM_DATA_DIR, district);
+    if (written < 0 || (size_t)written >= buflen) {
+        cm_error("district path is too long for %s\n", district);
+        return -1;
+    }
+
+    return 0;
+}
+
+int build_report_path(const char *district, char *buf, size_t buflen)
+{
+    int written;
+    char dir[PATH_MAX];
+
+    if (build_district_dir(district, dir, sizeof(dir)) == -1) {
+        return -1;
+    }
+
+    written = snprintf(buf, buflen, "%s/%s", dir, CM_REPORT_FILE);
     if (written < 0 || (size_t)written >= buflen) {
         cm_error("report path is too long for district %s\n", district);
+        return -1;
+    }
+
+    return 0;
+}
+
+int build_config_path(const char *district, char *buf, size_t buflen)
+{
+    int written;
+    char dir[PATH_MAX];
+
+    if (build_district_dir(district, dir, sizeof(dir)) == -1) {
+        return -1;
+    }
+
+    written = snprintf(buf, buflen, "%s/%s", dir, CM_CONFIG_FILE);
+    if (written < 0 || (size_t)written >= buflen) {
+        cm_error("config path is too long for district %s\n", district);
+        return -1;
+    }
+
+    return 0;
+}
+
+int build_log_path(const char *district, char *buf, size_t buflen)
+{
+    int written;
+    char dir[PATH_MAX];
+
+    if (build_district_dir(district, dir, sizeof(dir)) == -1) {
+        return -1;
+    }
+
+    written = snprintf(buf, buflen, "%s/%s", dir, CM_LOG_FILE);
+    if (written < 0 || (size_t)written >= buflen) {
+        cm_error("log path is too long for district %s\n", district);
         return -1;
     }
 
@@ -212,14 +263,103 @@ int build_report_path(const char *district, char *buf, size_t buflen)
 int build_latest_link_path(const char *district, char *buf, size_t buflen)
 {
     int written;
+    char dir[PATH_MAX];
 
-    if (validate_name(district, "district") == -1) {
+    if (build_district_dir(district, dir, sizeof(dir)) == -1) {
         return -1;
     }
 
-    written = snprintf(buf, buflen, "%s/%s.bin", CM_LATEST_DIR, district);
+    written = snprintf(buf, buflen, "%s/%s", dir, CM_LATEST_LINK);
     if (written < 0 || (size_t)written >= buflen) {
         cm_error("symlink path is too long for district %s\n", district);
+        return -1;
+    }
+
+    return 0;
+}
+
+int write_default_config(const char *path)
+{
+    int fd;
+    char buffer[128];
+    int written;
+
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0640);
+    if (fd == -1) {
+        cm_errno(path);
+        return -1;
+    }
+
+    written = snprintf(buffer,
+                       sizeof(buffer),
+                       "severity_threshold=%d\n",
+                       CM_DEFAULT_THRESHOLD);
+    if (written < 0 || (size_t)written >= sizeof(buffer) ||
+        cm_write_all(fd, buffer, (size_t)written) == -1 ||
+        fsync(fd) == -1) {
+        cm_errno(path);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+int create_empty_log(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0640);
+
+    if (fd == -1) {
+        cm_errno(path);
+        return -1;
+    }
+
+    if (fchmod(fd, 0640) == -1) {
+        cm_errno(path);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+int ensure_district_layout(const char *district)
+{
+    char dir[PATH_MAX];
+    char cfg_path[PATH_MAX];
+    char log_path[PATH_MAX];
+    struct stat st;
+
+    if (ensure_storage_layout() == -1 ||
+        build_district_dir(district, dir, sizeof(dir)) == -1) {
+        return -1;
+    }
+
+    if (ensure_directory(dir, 0750) == -1 ||
+        build_config_path(district, cfg_path, sizeof(cfg_path)) == -1 ||
+        build_log_path(district, log_path, sizeof(log_path)) == -1) {
+        return -1;
+    }
+
+    if (stat(cfg_path, &st) == -1) {
+        if (errno != ENOENT) {
+            cm_errno(cfg_path);
+            return -1;
+        }
+        if (write_default_config(cfg_path) == -1) {
+            return -1;
+        }
+    } else if (!S_ISREG(st.st_mode)) {
+        cm_error("%s exists but is not a regular file\n", cfg_path);
+        return -1;
+    } else if (chmod(cfg_path, 0640) == -1) {
+        cm_errno(cfg_path);
+        return -1;
+    }
+
+    if (create_empty_log(log_path) == -1) {
         return -1;
     }
 
@@ -229,19 +369,8 @@ int build_latest_link_path(const char *district, char *buf, size_t buflen)
 int update_latest_symlink(const char *district)
 {
     char link_path[PATH_MAX];
-    char target[PATH_MAX];
-    int written;
 
-    if (ensure_storage_layout() == -1) {
-        return -1;
-    }
     if (build_latest_link_path(district, link_path, sizeof(link_path)) == -1) {
-        return -1;
-    }
-
-    written = snprintf(target, sizeof(target), "../reports/%s.bin", district);
-    if (written < 0 || (size_t)written >= sizeof(target)) {
-        cm_error("symlink target is too long for district %s\n", district);
         return -1;
     }
 
@@ -250,11 +379,151 @@ int update_latest_symlink(const char *district)
         return -1;
     }
 
-    if (symlink(target, link_path) == -1) {
+    if (symlink(CM_REPORT_FILE, link_path) == -1) {
         cm_errno(link_path);
         return -1;
     }
 
+    return 0;
+}
+
+int parse_threshold_value(const char *text, int *threshold)
+{
+    long parsed;
+    char *end = NULL;
+
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno != 0 || end == text || parsed < 1 || parsed > 3) {
+        return -1;
+    }
+
+    *threshold = (int)parsed;
+    return 0;
+}
+
+int read_severity_threshold(const char *district, int *threshold)
+{
+    char cfg_path[PATH_MAX];
+    char buffer[256];
+    ssize_t nread;
+    int fd;
+    char *value;
+
+    *threshold = CM_DEFAULT_THRESHOLD;
+
+    if (ensure_district_layout(district) == -1 ||
+        build_config_path(district, cfg_path, sizeof(cfg_path)) == -1) {
+        return -1;
+    }
+
+    fd = open(cfg_path, O_RDONLY);
+    if (fd == -1) {
+        cm_errno(cfg_path);
+        return -1;
+    }
+
+    nread = read(fd, buffer, sizeof(buffer) - 1);
+    if (nread == -1) {
+        cm_errno(cfg_path);
+        close(fd);
+        return -1;
+    }
+    buffer[nread] = '\0';
+    close(fd);
+
+    value = strstr(buffer, "severity_threshold=");
+    if (value == NULL) {
+        return 0;
+    }
+
+    value += strlen("severity_threshold=");
+    if (parse_threshold_value(value, threshold) == -1) {
+        cm_error("%s has invalid severity_threshold; expected 1, 2, or 3\n",
+                 cfg_path);
+        return -1;
+    }
+
+    return 0;
+}
+
+int write_severity_threshold(const char *district, int threshold)
+{
+    char cfg_path[PATH_MAX];
+    int fd;
+    char buffer[128];
+    int written;
+
+    if (threshold < 1 || threshold > 3) {
+        cm_error("severity threshold must be 1, 2, or 3\n");
+        return -1;
+    }
+
+    if (ensure_district_layout(district) == -1 ||
+        build_config_path(district, cfg_path, sizeof(cfg_path)) == -1) {
+        return -1;
+    }
+
+    fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0640);
+    if (fd == -1) {
+        cm_errno(cfg_path);
+        return -1;
+    }
+
+    written = snprintf(buffer, sizeof(buffer), "severity_threshold=%d\n", threshold);
+    if (written < 0 || (size_t)written >= sizeof(buffer) ||
+        cm_write_all(fd, buffer, (size_t)written) == -1 ||
+        fsync(fd) == -1) {
+        cm_errno(cfg_path);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
+    return 0;
+}
+
+int append_district_log(const char *district,
+                        const char *role,
+                        const char *user,
+                        const char *action)
+{
+    char log_path[PATH_MAX];
+    char timestamp[32];
+    time_t now = time(NULL);
+    struct tm tm_value;
+    int fd;
+
+    if (ensure_district_layout(district) == -1 ||
+        build_log_path(district, log_path, sizeof(log_path)) == -1) {
+        return -1;
+    }
+
+    if (localtime_r(&now, &tm_value) == NULL) {
+        snprintf(timestamp, sizeof(timestamp), "unknown");
+    } else {
+        strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_value);
+    }
+
+    fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0640);
+    if (fd == -1) {
+        cm_errno(log_path);
+        return -1;
+    }
+
+    if (cm_writef(fd,
+                  "%s role=%s user=%s action=%s\n",
+                  timestamp,
+                  role == NULL ? "unknown" : role,
+                  user == NULL ? "unknown" : user,
+                  action == NULL ? "unknown" : action) == -1 ||
+        fsync(fd) == -1) {
+        cm_errno(log_path);
+        close(fd);
+        return -1;
+    }
+
+    close(fd);
     return 0;
 }
 
@@ -277,23 +546,19 @@ void format_mode(mode_t mode, char *buf, size_t buflen)
     buf[10] = '\0';
 }
 
-int print_file_metadata(const char *district)
+int print_stat_entry(const char *label, const char *path, int use_lstat)
 {
-    char report_path[PATH_MAX];
-    char link_path[PATH_MAX];
-    char mode_buf[11];
     struct stat st;
-    struct stat lst;
+    char mode_buf[11];
     char time_buf[32];
     struct tm tm_value;
 
-    if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
-        build_latest_link_path(district, link_path, sizeof(link_path)) == -1) {
-        return -1;
-    }
-
-    if (stat(report_path, &st) == -1) {
-        cm_errno(report_path);
+    if ((use_lstat ? lstat(path, &st) : stat(path, &st)) == -1) {
+        if (errno == ENOENT) {
+            cm_writef(STDOUT_FILENO, "%s: missing (%s)\n", label, path);
+            return 0;
+        }
+        cm_errno(path);
         return -1;
     }
 
@@ -304,31 +569,50 @@ int print_file_metadata(const char *district)
         strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_value);
     }
 
-    cm_writef(STDOUT_FILENO, "Report file: %s\n", report_path);
-    cm_writef(STDOUT_FILENO, "Size: %lld bytes\n", (long long)st.st_size);
-    cm_writef(STDOUT_FILENO, "Mode: %s (%03o)\n", mode_buf, st.st_mode & 0777);
-    cm_writef(STDOUT_FILENO, "Modified: %s\n", time_buf);
+    cm_writef(STDOUT_FILENO,
+              "%s: %s | size=%lld | mode=%s (%03o) | modified=%s\n",
+              label,
+              path,
+              (long long)st.st_size,
+              mode_buf,
+              st.st_mode & 0777,
+              time_buf);
+    return 0;
+}
 
-    if (lstat(link_path, &lst) == -1) {
-        if (errno == ENOENT) {
-            cm_write_text(STDOUT_FILENO, "Latest symlink: missing\n");
-        } else {
-            cm_errno(link_path);
-            return -1;
-        }
-    } else {
-        char target[PATH_MAX];
-        ssize_t len;
+int print_file_metadata(const char *district)
+{
+    char dir[PATH_MAX];
+    char report_path[PATH_MAX];
+    char cfg_path[PATH_MAX];
+    char log_path[PATH_MAX];
+    char link_path[PATH_MAX];
+    char target[PATH_MAX];
+    ssize_t len;
 
-        len = readlink(link_path, target, sizeof(target) - 1);
-        if (len == -1) {
-            cm_errno(link_path);
-            return -1;
-        }
+    if (build_district_dir(district, dir, sizeof(dir)) == -1 ||
+        build_report_path(district, report_path, sizeof(report_path)) == -1 ||
+        build_config_path(district, cfg_path, sizeof(cfg_path)) == -1 ||
+        build_log_path(district, log_path, sizeof(log_path)) == -1 ||
+        build_latest_link_path(district, link_path, sizeof(link_path)) == -1) {
+        return -1;
+    }
+
+    if (print_stat_entry("District directory", dir, 0) == -1 ||
+        print_stat_entry("Binary reports", report_path, 0) == -1 ||
+        print_stat_entry("Config", cfg_path, 0) == -1 ||
+        print_stat_entry("Operation log", log_path, 0) == -1 ||
+        print_stat_entry("Report symlink", link_path, 1) == -1) {
+        return -1;
+    }
+
+    len = readlink(link_path, target, sizeof(target) - 1);
+    if (len != -1) {
         target[len] = '\0';
-        format_mode(lst.st_mode, mode_buf, sizeof(mode_buf));
-        cm_writef(STDOUT_FILENO, "Latest symlink: %s -> %s\n", link_path, target);
-        cm_writef(STDOUT_FILENO, "Symlink mode: %s\n", mode_buf);
+        cm_writef(STDOUT_FILENO, "Report symlink target: %s\n", target);
+    } else if (errno != ENOENT) {
+        cm_errno(link_path);
+        return -1;
     }
 
     return 0;

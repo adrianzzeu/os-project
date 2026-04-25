@@ -6,15 +6,15 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <stdio.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
 
-#define REPORT_STORE_VERSION 1U
-#define REPORT_MAGIC "CMRPT01"
+#define REPORT_STORE_VERSION 2U
+#define REPORT_MAGIC "CMRPT02"
 
 typedef struct ReportStoreHeader {
     char magic[8];
@@ -26,13 +26,13 @@ typedef struct ReportStoreHeader {
 
 typedef struct ReportRecord {
     uint32_t id;
-    char district[REPORT_DISTRICT_LEN];
-    char title[REPORT_TITLE_LEN];
-    char description[REPORT_DESCRIPTION_LEN];
-    char status[REPORT_STATUS_LEN];
+    char inspector[REPORT_USER_LEN];
+    double latitude;
+    double longitude;
+    char category[REPORT_CATEGORY_LEN];
     int32_t severity;
-    int64_t created_at;
-    int64_t updated_at;
+    time_t timestamp;
+    char description[REPORT_DESCRIPTION_LEN];
     uint8_t active;
     uint8_t reserved[7];
 } ReportRecord;
@@ -41,7 +41,7 @@ int write_all_at(int fd, const void *buf, size_t count, off_t offset);
 int read_all_at(int fd, void *buf, size_t count, off_t offset);
 int open_store(const char *district, int create, int *fd, ReportStoreHeader *header);
 void copy_field(char *dest, size_t dest_size, const char *src);
-void format_timestamp(int64_t timestamp, char *buf, size_t buflen);
+void format_timestamp(time_t timestamp, char *buf, size_t buflen);
 char *trim(char *text);
 int parse_int_value(const char *text, int *value);
 int contains_case_insensitive(const char *haystack, const char *needle);
@@ -105,8 +105,15 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
     struct stat st;
     int flags = O_RDWR;
 
-    if (ensure_storage_layout() == -1 ||
-        build_report_path(district, path, sizeof(path)) == -1) {
+    if (create) {
+        if (ensure_district_layout(district) == -1) {
+            return -1;
+        }
+    } else if (ensure_storage_layout() == -1) {
+        return -1;
+    }
+
+    if (build_report_path(district, path, sizeof(path)) == -1) {
         return -1;
     }
 
@@ -116,7 +123,11 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
 
     *fd = open(path, flags, 0640);
     if (*fd == -1) {
-        cm_errno(path);
+        if (!create && errno == ENOENT) {
+            cm_error("report store for %s does not exist\n", district);
+        } else {
+            cm_errno(path);
+        }
         return -1;
     }
 
@@ -134,7 +145,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
 
     if (st.st_size == 0) {
         if (!create) {
-            cm_error("report store for %s does not exist\n", district);
+            cm_error("report store for %s is empty\n", district);
             close(*fd);
             return -1;
         }
@@ -188,12 +199,11 @@ void copy_field(char *dest, size_t dest_size, const char *src)
     snprintf(dest, dest_size, "%s", src);
 }
 
-void format_timestamp(int64_t timestamp, char *buf, size_t buflen)
+void format_timestamp(time_t timestamp, char *buf, size_t buflen)
 {
-    time_t raw = (time_t)timestamp;
     struct tm tm_value;
 
-    if (localtime_r(&raw, &tm_value) == NULL) {
+    if (localtime_r(&timestamp, &tm_value) == NULL) {
         snprintf(buf, buflen, "unknown");
         return;
     }
@@ -281,13 +291,18 @@ int record_matches_filter(const ReportRecord *record, const ReportFilter *filter
     if (filter->max_severity != -1 && record->severity > filter->max_severity) {
         return 0;
     }
-    if (filter->status[0] != '\0' && strcmp(record->status, filter->status) != 0) {
+    if (filter->inspector[0] != '\0' &&
+        strcmp(record->inspector, filter->inspector) != 0) {
+        return 0;
+    }
+    if (filter->category[0] != '\0' &&
+        strcmp(record->category, filter->category) != 0) {
         return 0;
     }
     if (filter->text[0] != '\0' &&
-        !contains_case_insensitive(record->title, filter->text) &&
         !contains_case_insensitive(record->description, filter->text) &&
-        !contains_case_insensitive(record->district, filter->text)) {
+        !contains_case_insensitive(record->category, filter->text) &&
+        !contains_case_insensitive(record->inspector, filter->text)) {
         return 0;
     }
 
@@ -297,12 +312,14 @@ int record_matches_filter(const ReportRecord *record, const ReportFilter *filter
 void report_input_defaults(ReportInput *input)
 {
     memset(input, 0, sizeof(*input));
-    copy_field(input->title, sizeof(input->title), "Infrastructure inspection");
+    copy_field(input->inspector, sizeof(input->inspector), "unknown");
+    copy_field(input->category, sizeof(input->category), "general");
     copy_field(input->description,
                sizeof(input->description),
                "Report created from command line.");
-    copy_field(input->status, sizeof(input->status), "open");
-    input->severity = 3;
+    input->severity = 1;
+    input->latitude = 0.0;
+    input->longitude = 0.0;
 }
 
 void report_filter_defaults(ReportFilter *filter)
@@ -350,8 +367,10 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
             }
             filter->min_severity = value;
             filter->max_severity = value;
-        } else if (strncmp(part, "status=", 7) == 0) {
-            copy_field(filter->status, sizeof(filter->status), part + 7);
+        } else if (strncmp(part, "category=", 9) == 0) {
+            copy_field(filter->category, sizeof(filter->category), part + 9);
+        } else if (strncmp(part, "inspector=", 10) == 0) {
+            copy_field(filter->inspector, sizeof(filter->inspector), part + 10);
         } else if (strncmp(part, "text=", 5) == 0) {
             copy_field(filter->text, sizeof(filter->text), part + 5);
         } else if (strncmp(part, "id=", 3) == 0) {
@@ -386,27 +405,29 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
     return 0;
 }
 
-int add_report(const char *district, const ReportInput *input)
+int add_report(const char *district, const ReportInput *input, unsigned int *created_id)
 {
     int fd;
+    int threshold;
     ReportStoreHeader header;
     ReportRecord record;
     off_t offset;
     char created[32];
 
-    if (open_store(district, 1, &fd, &header) == -1) {
+    if (read_severity_threshold(district, &threshold) == -1 ||
+        open_store(district, 1, &fd, &header) == -1) {
         return -1;
     }
 
     memset(&record, 0, sizeof(record));
     record.id = header.next_id++;
-    copy_field(record.district, sizeof(record.district), district);
-    copy_field(record.title, sizeof(record.title), input->title);
-    copy_field(record.description, sizeof(record.description), input->description);
-    copy_field(record.status, sizeof(record.status), input->status);
+    copy_field(record.inspector, sizeof(record.inspector), input->inspector);
+    record.latitude = input->latitude;
+    record.longitude = input->longitude;
+    copy_field(record.category, sizeof(record.category), input->category);
     record.severity = input->severity;
-    record.created_at = (int64_t)time(NULL);
-    record.updated_at = record.created_at;
+    record.timestamp = time(NULL);
+    copy_field(record.description, sizeof(record.description), input->description);
     record.active = 1;
 
     offset = lseek(fd, 0, SEEK_END);
@@ -426,13 +447,29 @@ int add_report(const char *district, const ReportInput *input)
 
     close(fd);
 
-    format_timestamp(record.created_at, created, sizeof(created));
+    if (created_id != NULL) {
+        *created_id = record.id;
+    }
+
+    format_timestamp(record.timestamp, created, sizeof(created));
     cm_writef(STDOUT_FILENO, "Added report %u for %s\n", record.id, district);
     cm_writef(STDOUT_FILENO,
-              "Status: %s | Severity: %d | Created: %s\n",
-              record.status,
+              "Inspector: %s | Category: %s | Severity: %d | GPS: %.6f, %.6f | Created: %s\n",
+              record.inspector,
+              record.category,
               record.severity,
+              record.latitude,
+              record.longitude,
               created);
+
+    if (record.severity >= threshold) {
+        cm_writef(STDOUT_FILENO,
+                  "ESCALATION ALERT: severity %d reached threshold %d for %s\n",
+                  record.severity,
+                  threshold,
+                  district);
+    }
+
     return 0;
 }
 
@@ -442,7 +479,6 @@ int remove_report(const char *district, unsigned int id)
     ReportStoreHeader header;
     ReportRecord record;
     off_t offset;
-    int found = 0;
 
     if (open_store(district, 0, &fd, &header) == -1) {
         return -1;
@@ -470,7 +506,6 @@ int remove_report(const char *district, unsigned int id)
         }
 
         if (record.id == id) {
-            found = 1;
             if (!record.active) {
                 cm_writef(STDOUT_FILENO,
                           "Report %u in %s is already removed\n",
@@ -481,7 +516,6 @@ int remove_report(const char *district, unsigned int id)
             }
 
             record.active = 0;
-            record.updated_at = (int64_t)time(NULL);
 
             if (write_all_at(fd, &record, sizeof(record), offset) == -1 ||
                 fsync(fd) == -1) {
@@ -497,13 +531,8 @@ int remove_report(const char *district, unsigned int id)
     }
 
     close(fd);
-
-    if (!found) {
-        cm_error("report %u was not found in %s\n", id, district);
-        return -1;
-    }
-
-    return 0;
+    cm_error("report %u was not found in %s\n", id, district);
+    return -1;
 }
 
 int list_reports(const char *district, const ReportFilter *filter)
@@ -519,15 +548,19 @@ int list_reports(const char *district, const ReportFilter *filter)
     }
 
     cm_writef(STDOUT_FILENO,
-              "%-5s %-8s %-7s %-19s %s\n",
+              "%-5s %-3s %-6s %-19s %-14s %-10s %-11s %-11s %s\n",
               "ID",
-              "Severity",
+              "Sev",
               "Active",
-              "Created",
-              "Title");
+              "Timestamp",
+              "Inspector",
+              "Category",
+              "Latitude",
+              "Longitude",
+              "Description");
     for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
-        char created[32];
+        char timestamp[32];
 
         if (nread == -1) {
             if (errno == EINTR) {
@@ -551,14 +584,18 @@ int list_reports(const char *district, const ReportFilter *filter)
             continue;
         }
 
-        format_timestamp(record.created_at, created, sizeof(created));
+        format_timestamp(record.timestamp, timestamp, sizeof(timestamp));
         cm_writef(STDOUT_FILENO,
-                  "%-5u %-8d %-7s %-19s %s\n",
+                  "%-5u %-3d %-6s %-19s %-14s %-10s %-11.6f %-11.6f %s\n",
                   record.id,
                   record.severity,
                   record.active ? "yes" : "no",
-                  created,
-                  record.title);
+                  timestamp,
+                  record.inspector,
+                  record.category,
+                  record.latitude,
+                  record.longitude,
+                  record.description);
         matches++;
     }
 
@@ -605,20 +642,18 @@ int show_report(const char *district, unsigned int id)
         }
 
         if (record_matches_filter(&record, &filter)) {
-            char created[32];
-            char updated[32];
+            char timestamp[32];
 
-            format_timestamp(record.created_at, created, sizeof(created));
-            format_timestamp(record.updated_at, updated, sizeof(updated));
+            format_timestamp(record.timestamp, timestamp, sizeof(timestamp));
             cm_writef(STDOUT_FILENO, "ID: %u\n", record.id);
-            cm_writef(STDOUT_FILENO, "District: %s\n", record.district);
-            cm_writef(STDOUT_FILENO, "Title: %s\n", record.title);
-            cm_writef(STDOUT_FILENO, "Description: %s\n", record.description);
-            cm_writef(STDOUT_FILENO, "Status: %s\n", record.status);
+            cm_writef(STDOUT_FILENO, "District: %s\n", district);
+            cm_writef(STDOUT_FILENO, "Inspector: %s\n", record.inspector);
+            cm_writef(STDOUT_FILENO, "GPS: %.6f, %.6f\n", record.latitude, record.longitude);
+            cm_writef(STDOUT_FILENO, "Category: %s\n", record.category);
             cm_writef(STDOUT_FILENO, "Severity: %d\n", record.severity);
+            cm_writef(STDOUT_FILENO, "Timestamp: %s\n", timestamp);
+            cm_writef(STDOUT_FILENO, "Description: %s\n", record.description);
             cm_writef(STDOUT_FILENO, "Active: %s\n", record.active ? "yes" : "no");
-            cm_writef(STDOUT_FILENO, "Created: %s\n", created);
-            cm_writef(STDOUT_FILENO, "Updated: %s\n", updated);
             close(fd);
             return 0;
         }
