@@ -23,6 +23,8 @@ system-call-oriented.
 - I wrote a project `README.md` documenting build steps, command usage, roles,
   file layout, permissions, binary report storage, filtering, metadata, logs,
   symlinks, and cleanup.
+- I prepared the Phase 1 submission archive with the source files, build files,
+  documentation, AI usage log, and sample generated district data.
 - I changed the storage layout so each district has its own directory directly
   under the project folder, such as `./downtown/`.
 - I added the required district files:
@@ -103,6 +105,8 @@ system-call-oriented.
   flows.
 - AI helped me organize the project documentation, while I kept the wording
   aligned with the actual behavior and assignment requirements.
+- AI helped me check the submission package contents and verify that the sample
+  generated directory structure includes two districts and symbolic links.
 
 ### How I guided the AI
 
@@ -122,6 +126,8 @@ system-call-oriented.
   description fields.
 - I asked AI to help document the whole project so the usage and implementation
   details are easier to explain during evaluation.
+- I asked AI to help prepare the required `tar.gz` archive for Phase 1
+  submission.
 - I corrected the AI usage wording so it reflects that I did the project and AI
   only gave guidance where I needed it.
 - Most of the direction came from me; AI was mainly used for small checks,
@@ -133,6 +139,8 @@ system-call-oriented.
 - The project also builds with `make`.
 - The project now has a `README.md` with full usage and implementation
   documentation.
+- The Phase 1 archive includes two generated districts, `downtown` and
+  `riverside`, with their report files, config files, logs, and symlinks.
 - I verified the packed binary layout by adding three reports, checking that
   `reports.dat` was exactly `3 * sizeof(Report)`, removing the middle report,
   and checking that the file shrank to `2 * sizeof(Report)`.
