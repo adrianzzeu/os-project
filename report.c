@@ -13,21 +13,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#define REPORT_STORE_VERSION 2U
-#define REPORT_MAGIC "CMRPT02"
-
-typedef struct ReportStoreHeader {
-    char magic[8];
-    uint32_t version;
-    uint32_t record_size;
-    uint32_t next_id;
-    uint32_t reserved;
-} ReportStoreHeader;
-
 int write_all_at(int fd, const void *buf, size_t count, off_t offset);
 int read_all_at(int fd, void *buf, size_t count, off_t offset);
-int read_exact_fd(int fd, void *buf, size_t count);
-int open_store(const char *district, int create, int *fd, ReportStoreHeader *header);
+int open_store(const char *district, int create, int *fd);
+int next_report_id(int fd, uint32_t *next_id);
 int shift_records_left(int fd, off_t remove_offset, off_t end_offset);
 void copy_field(char *dest, size_t dest_size, const char *src);
 void format_timestamp(time_t timestamp, char *buf, size_t buflen);
@@ -93,30 +82,7 @@ int read_all_at(int fd, void *buf, size_t count, off_t offset)
     return 0;
 }
 
-int read_exact_fd(int fd, void *buf, size_t count)
-{
-    char *cursor = (char *)buf;
-    size_t read_total = 0;
-
-    while (read_total < count) {
-        ssize_t nread = read(fd, cursor + read_total, count - read_total);
-        if (nread == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return -1;
-        }
-        if (nread == 0) {
-            errno = EIO;
-            return -1;
-        }
-        read_total += (size_t)nread;
-    }
-
-    return 0;
-}
-
-int open_store(const char *district, int create, int *fd, ReportStoreHeader *header)
+int open_store(const char *district, int create, int *fd)
 {
     char path[PATH_MAX];
     struct stat st;
@@ -168,42 +134,10 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         return -1;
     }
 
-    if (st.st_size == 0) {
-        if (!create) {
-            cm_error("report store for %s is empty\n", district);
-            close(*fd);
-            return -1;
-        }
-
-        memset(header, 0, sizeof(*header));
-        memcpy(header->magic, REPORT_MAGIC, sizeof(header->magic));
-        header->version = REPORT_STORE_VERSION;
-        header->record_size = (uint32_t)sizeof(Report);
-        header->next_id = 1;
-
-        if (write_all_at(*fd, header, sizeof(*header), 0) == -1) {
-            cm_errno(path);
-            close(*fd);
-            return -1;
-        }
-    } else {
-        if ((size_t)st.st_size < sizeof(*header)) {
-            cm_error("%s is too small to be a report store\n", path);
-            close(*fd);
-            return -1;
-        }
-        if (read_all_at(*fd, header, sizeof(*header), 0) == -1) {
-            cm_errno(path);
-            close(*fd);
-            return -1;
-        }
-        if (memcmp(header->magic, REPORT_MAGIC, sizeof(header->magic)) != 0 ||
-            header->version != REPORT_STORE_VERSION ||
-            header->record_size != sizeof(Report)) {
-            cm_error("%s has an incompatible report-store format\n", path);
-            close(*fd);
-            return -1;
-        }
+    if (st.st_size % (off_t)sizeof(Report) != 0) {
+        cm_error("%s ended with a partial report record\n", path);
+        close(*fd);
+        return -1;
     }
 
     if (create && update_latest_symlink(district) == -1) {
@@ -214,6 +148,44 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
     return 0;
 }
 
+int next_report_id(int fd, uint32_t *next_id)
+{
+    Report record;
+    off_t offset = 0;
+    uint32_t max_id = 0;
+
+    for (;;) {
+        ssize_t nread = pread(fd, &record, sizeof(record), offset);
+
+        if (nread == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        if ((size_t)nread != sizeof(record)) {
+            errno = EIO;
+            return -1;
+        }
+
+        if (record.id > max_id) {
+            max_id = record.id;
+        }
+        offset += (off_t)sizeof(record);
+    }
+
+    if (max_id == UINT32_MAX) {
+        errno = EOVERFLOW;
+        return -1;
+    }
+
+    *next_id = max_id + 1U;
+    return 0;
+}
+
 int shift_records_left(int fd, off_t remove_offset, off_t end_offset)
 {
     Report record;
@@ -221,16 +193,8 @@ int shift_records_left(int fd, off_t remove_offset, off_t end_offset)
     off_t write_offset = remove_offset;
 
     while (read_offset < end_offset) {
-        if (lseek(fd, read_offset, SEEK_SET) == (off_t)-1) {
-            return -1;
-        }
-        if (read(fd, &record, sizeof(record)) != (ssize_t)sizeof(record)) {
-            return -1;
-        }
-        if (lseek(fd, write_offset, SEEK_SET) == (off_t)-1) {
-            return -1;
-        }
-        if (write(fd, &record, sizeof(record)) != (ssize_t)sizeof(record)) {
+        if (read_all_at(fd, &record, sizeof(record), read_offset) == -1 ||
+            write_all_at(fd, &record, sizeof(record), write_offset) == -1) {
             return -1;
         }
 
@@ -636,7 +600,6 @@ int add_report(const char *district,
 {
     int fd;
     int threshold;
-    ReportStoreHeader header;
     Report record;
     off_t offset;
     char created[32];
@@ -657,12 +620,16 @@ int add_report(const char *district,
         return -1;
     }
 
-    if (open_store(district, 1, &fd, &header) == -1) {
+    if (open_store(district, 1, &fd) == -1) {
         return -1;
     }
 
     memset(&record, 0, sizeof(record));
-    record.id = header.next_id++;
+    if (next_report_id(fd, &record.id) == -1) {
+        cm_errno("allocate report id");
+        close(fd);
+        return -1;
+    }
     copy_field(record.inspector, sizeof(record.inspector), input->inspector);
     record.latitude = input->latitude;
     record.longitude = input->longitude;
@@ -679,9 +646,7 @@ int add_report(const char *district,
         return -1;
     }
 
-    if (write_all_at(fd, &record, sizeof(record), offset) == -1 ||
-        write_all_at(fd, &header, sizeof(header), 0) == -1 ||
-        fsync(fd) == -1) {
+    if (write_all_at(fd, &record, sizeof(record), offset) == -1 || fsync(fd) == -1) {
         cm_errno("write report");
         close(fd);
         return -1;
@@ -718,7 +683,6 @@ int add_report(const char *district,
 int remove_report(const char *district, unsigned int id, const char *role)
 {
     int fd;
-    ReportStoreHeader header;
     Report record;
     off_t offset;
     off_t end_offset;
@@ -729,7 +693,7 @@ int remove_report(const char *district, unsigned int id, const char *role)
         return -1;
     }
 
-    if (open_store(district, 0, &fd, &header) == -1) {
+    if (open_store(district, 0, &fd) == -1) {
         return -1;
     }
 
@@ -740,7 +704,7 @@ int remove_report(const char *district, unsigned int id, const char *role)
         return -1;
     }
 
-    for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
+    for (offset = 0;; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
 
         if (nread == -1) {
@@ -822,8 +786,8 @@ int filter_reports(const char *district,
     char fields[16][REPORT_CONDITION_FIELD_LEN];
     char ops[16][REPORT_CONDITION_OP_LEN];
     char values[16][REPORT_CONDITION_VALUE_LEN];
-    ReportStoreHeader header;
     Report record;
+    struct stat st;
     int fd;
     int i;
     int matches = 0;
@@ -856,16 +820,13 @@ int filter_reports(const char *district,
         return -1;
     }
 
-    if (read_exact_fd(fd, &header, sizeof(header)) == -1) {
+    if (fstat(fd, &st) == -1) {
         cm_errno(report_path);
         close(fd);
         return -1;
     }
-
-    if (memcmp(header.magic, REPORT_MAGIC, sizeof(header.magic)) != 0 ||
-        header.version != REPORT_STORE_VERSION ||
-        header.record_size != sizeof(Report)) {
-        cm_error("%s has an incompatible report-store format\n", report_path);
+    if (st.st_size % (off_t)sizeof(Report) != 0) {
+        cm_error("%s ended with a partial report record\n", report_path);
         close(fd);
         return -1;
     }
@@ -917,7 +878,6 @@ int filter_reports(const char *district,
 int list_reports(const char *district, const ReportFilter *filter, const char *role)
 {
     int fd;
-    ReportStoreHeader header;
     Report record;
     off_t offset;
     int matches = 0;
@@ -927,12 +887,12 @@ int list_reports(const char *district, const ReportFilter *filter, const char *r
     if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
         check_role_access(report_path, role, 1, 0, 0) == -1 ||
         print_report_file_info(district) == -1 ||
-        open_store(district, 0, &fd, &header) == -1) {
+        open_store(district, 0, &fd) == -1) {
         return -1;
     }
 
     print_report_table_header();
-    for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
+    for (offset = 0;; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
 
         if (nread == -1) {
@@ -970,7 +930,6 @@ int show_report(const char *district, unsigned int id, const char *role)
 {
     ReportFilter filter;
     int fd;
-    ReportStoreHeader header;
     Report record;
     off_t offset;
     char report_path[PATH_MAX];
@@ -981,11 +940,11 @@ int show_report(const char *district, unsigned int id, const char *role)
 
     if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
         check_role_access(report_path, role, 1, 0, 0) == -1 ||
-        open_store(district, 0, &fd, &header) == -1) {
+        open_store(district, 0, &fd) == -1) {
         return -1;
     }
 
-    for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
+    for (offset = 0;; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
 
         if (nread == -1) {

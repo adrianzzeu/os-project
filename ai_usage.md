@@ -27,6 +27,10 @@ system-call-oriented.
 - I updated the binary report records to store report ID, inspector name from
   `--user`, latitude, longitude, issue category, severity, timestamp, and
   description.
+- I corrected `reports.dat` so it stores only packed fixed-size `Report`
+  records starting at byte 0, without a separate file header before record 0.
+- I made report ID allocation come from scanning the existing records for the
+  highest ID, instead of keeping extra metadata inside `reports.dat`.
 - I added district severity thresholds in `district.cfg` and made high-severity
   reports print an escalation alert when they meet the threshold.
 - I added operation logging so successful actions write the timestamp, declared
@@ -73,6 +77,9 @@ system-call-oriented.
 - AI gave me a little guidance while I changed the district layout and record
   format, but I directed the changes and kept the implementation aligned with
   my assignment requirements.
+- AI helped me notice that my first binary-file layout had extra metadata before
+  record 0, and I adjusted the implementation so record offsets now match
+  `report_index * sizeof(Report)`.
 - I implemented the permission-bit simulation mostly myself, with only a small
   amount of AI help to check edge cases like exact `district.cfg` permissions,
   symbolic permission output, and physical record deletion.
@@ -109,6 +116,9 @@ system-call-oriented.
 
 - The project builds with `./build.sh`.
 - The project also builds with `make`.
+- I verified the packed binary layout by adding three reports, checking that
+  `reports.dat` was exactly `3 * sizeof(Report)`, removing the middle report,
+  and checking that the file shrank to `2 * sizeof(Report)`.
 - The program has been tested with add, list, show, metadata, filter, threshold
   update, inspector denial, manager removal, root symbolic link creation, and
   dangling symbolic link warnings.
