@@ -20,6 +20,9 @@ system-call-oriented.
 - I added listing, showing, metadata display, and report filtering.
 - I added a `build.sh` script so the project can be compiled into the
   `city_manager` executable.
+- I wrote a project `README.md` documenting build steps, command usage, roles,
+  file layout, permissions, binary report storage, filtering, metadata, logs,
+  symlinks, and cleanup.
 - I changed the storage layout so each district has its own directory directly
   under the project folder, such as `./downtown/`.
 - I added the required district files:
@@ -98,6 +101,8 @@ system-call-oriented.
   especially using `lstat()` and warning about dangling links.
 - AI guided me in testing compile errors, warning flags, and the main command
   flows.
+- AI helped me organize the project documentation, while I kept the wording
+  aligned with the actual behavior and assignment requirements.
 
 ### How I guided the AI
 
@@ -115,6 +120,8 @@ system-call-oriented.
 - I showed AI sample terminal output and used it as guidance while I updated
   `--add` to prompt for missing latitude, longitude, category, severity, and
   description fields.
+- I asked AI to help document the whole project so the usage and implementation
+  details are easier to explain during evaluation.
 - I corrected the AI usage wording so it reflects that I did the project and AI
   only gave guidance where I needed it.
 - Most of the direction came from me; AI was mainly used for small checks,
@@ -124,6 +131,8 @@ system-call-oriented.
 
 - The project builds with `./build.sh`.
 - The project also builds with `make`.
+- The project now has a `README.md` with full usage and implementation
+  documentation.
 - I verified the packed binary layout by adding three reports, checking that
   `reports.dat` was exactly `3 * sizeof(Report)`, removing the middle report,
   and checking that the file shrank to `2 * sizeof(Report)`.
