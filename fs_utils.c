@@ -15,6 +15,7 @@ int write_default_config(const char *path);
 int create_empty_log(const char *path);
 int print_stat_entry(const char *label, const char *path, int use_lstat);
 int parse_threshold_value(const char *text, int *threshold);
+void describe_access(int need_read, int need_write, int need_execute, char *buf, size_t buflen);
 
 int cm_write_all(int fd, const char *buf, size_t count)
 {
@@ -138,10 +139,15 @@ void cm_errno(const char *context)
 int ensure_directory(const char *path, mode_t mode)
 {
     struct stat st;
+    int created = 0;
 
-    if (mkdir(path, mode) == -1 && errno != EEXIST) {
-        cm_errno(path);
-        return -1;
+    if (mkdir(path, mode) == -1) {
+        if (errno != EEXIST) {
+            cm_errno(path);
+            return -1;
+        }
+    } else {
+        created = 1;
     }
 
     if (stat(path, &st) == -1) {
@@ -154,7 +160,7 @@ int ensure_directory(const char *path, mode_t mode)
         return -1;
     }
 
-    if (chmod(path, mode) == -1) {
+    if (created && chmod(path, mode) == -1) {
         cm_errno(path);
         return -1;
     }
@@ -164,7 +170,7 @@ int ensure_directory(const char *path, mode_t mode)
 
 int ensure_storage_layout(void)
 {
-    return ensure_directory(CM_DATA_DIR, 0750);
+    return ensure_directory(CM_DATA_DIR, CM_DISTRICT_MODE);
 }
 
 int validate_name(const char *name, const char *label)
@@ -284,9 +290,15 @@ int write_default_config(const char *path)
     char buffer[128];
     int written;
 
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0640);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, CM_CONFIG_MODE);
     if (fd == -1) {
         cm_errno(path);
+        return -1;
+    }
+
+    if (fchmod(fd, CM_CONFIG_MODE) == -1) {
+        cm_errno(path);
+        close(fd);
         return -1;
     }
 
@@ -308,14 +320,25 @@ int write_default_config(const char *path)
 
 int create_empty_log(const char *path)
 {
-    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0640);
+    struct stat st;
+    int existed = 0;
+    int fd;
+
+    if (stat(path, &st) == 0) {
+        existed = 1;
+    } else if (errno != ENOENT) {
+        cm_errno(path);
+        return -1;
+    }
+
+    fd = open(path, O_WRONLY | O_CREAT | O_APPEND, CM_LOG_MODE);
 
     if (fd == -1) {
         cm_errno(path);
         return -1;
     }
 
-    if (fchmod(fd, 0640) == -1) {
+    if (!existed && fchmod(fd, CM_LOG_MODE) == -1) {
         cm_errno(path);
         close(fd);
         return -1;
@@ -337,7 +360,7 @@ int ensure_district_layout(const char *district)
         return -1;
     }
 
-    if (ensure_directory(dir, 0750) == -1 ||
+    if (ensure_directory(dir, CM_DISTRICT_MODE) == -1 ||
         build_config_path(district, cfg_path, sizeof(cfg_path)) == -1 ||
         build_log_path(district, log_path, sizeof(log_path)) == -1) {
         return -1;
@@ -354,9 +377,6 @@ int ensure_district_layout(const char *district)
     } else if (!S_ISREG(st.st_mode)) {
         cm_error("%s exists but is not a regular file\n", cfg_path);
         return -1;
-    } else if (chmod(cfg_path, 0640) == -1) {
-        cm_errno(cfg_path);
-        return -1;
     }
 
     if (create_empty_log(log_path) == -1) {
@@ -364,6 +384,104 @@ int ensure_district_layout(const char *district)
     }
 
     return 0;
+}
+
+void describe_access(int need_read, int need_write, int need_execute, char *buf, size_t buflen)
+{
+    snprintf(buf,
+             buflen,
+             "%s%s%s",
+             need_read ? "read" : "",
+             need_write ? (need_read ? "+write" : "write") : "",
+             need_execute ? ((need_read || need_write) ? "+execute" : "execute") : "");
+}
+
+int role_has_access(mode_t mode,
+                    const char *role,
+                    int need_read,
+                    int need_write,
+                    int need_execute)
+{
+    int shift;
+    mode_t bits;
+
+    if (strcmp(role, "manager") == 0) {
+        shift = 6;
+    } else if (strcmp(role, "inspector") == 0) {
+        shift = 3;
+    } else {
+        return 0;
+    }
+
+    bits = (mode >> shift) & 07;
+    if (need_read && !(bits & 04)) {
+        return 0;
+    }
+    if (need_write && !(bits & 02)) {
+        return 0;
+    }
+    if (need_execute && !(bits & 01)) {
+        return 0;
+    }
+
+    return 1;
+}
+
+int check_role_access(const char *path,
+                      const char *role,
+                      int need_read,
+                      int need_write,
+                      int need_execute)
+{
+    struct stat st;
+    char mode_buf[11];
+    char access_buf[32];
+
+    if (stat(path, &st) == -1) {
+        cm_errno(path);
+        return -1;
+    }
+
+    if (role_has_access(st.st_mode, role, need_read, need_write, need_execute)) {
+        return 0;
+    }
+
+    format_mode(st.st_mode, mode_buf, sizeof(mode_buf));
+    describe_access(need_read, need_write, need_execute, access_buf, sizeof(access_buf));
+    cm_error("permission denied for role=%s on %s: need %s, current mode %s (%03o)\n",
+             role,
+             path,
+             access_buf,
+             mode_buf,
+             st.st_mode & 0777);
+    return -1;
+}
+
+int check_exact_permissions(const char *path, mode_t expected, const char *label)
+{
+    struct stat st;
+    char current[11];
+    char wanted[11];
+
+    if (stat(path, &st) == -1) {
+        cm_errno(path);
+        return -1;
+    }
+
+    if ((st.st_mode & 0777) == expected) {
+        return 0;
+    }
+
+    format_mode(st.st_mode, current, sizeof(current));
+    format_mode(expected, wanted, sizeof(wanted));
+    cm_error("%s permission mismatch on %s: expected %s (%03o), found %s (%03o)\n",
+             label,
+             path,
+             wanted + 1,
+             expected,
+             current,
+             st.st_mode & 0777);
+    return -1;
 }
 
 int update_latest_symlink(const char *district)
@@ -402,7 +520,7 @@ int parse_threshold_value(const char *text, int *threshold)
     return 0;
 }
 
-int read_severity_threshold(const char *district, int *threshold)
+int read_severity_threshold(const char *district, const char *role, int *threshold)
 {
     char cfg_path[PATH_MAX];
     char buffer[256];
@@ -414,6 +532,10 @@ int read_severity_threshold(const char *district, int *threshold)
 
     if (ensure_district_layout(district) == -1 ||
         build_config_path(district, cfg_path, sizeof(cfg_path)) == -1) {
+        return -1;
+    }
+
+    if (check_role_access(cfg_path, role, 1, 0, 0) == -1) {
         return -1;
     }
 
@@ -447,7 +569,7 @@ int read_severity_threshold(const char *district, int *threshold)
     return 0;
 }
 
-int write_severity_threshold(const char *district, int threshold)
+int write_severity_threshold(const char *district, const char *role, int threshold)
 {
     char cfg_path[PATH_MAX];
     int fd;
@@ -464,7 +586,14 @@ int write_severity_threshold(const char *district, int threshold)
         return -1;
     }
 
-    fd = open(cfg_path, O_WRONLY | O_CREAT | O_TRUNC, 0640);
+    if (check_exact_permissions(cfg_path,
+                                CM_CONFIG_MODE,
+                                "district.cfg") == -1 ||
+        check_role_access(cfg_path, role, 1, 1, 0) == -1) {
+        return -1;
+    }
+
+    fd = open(cfg_path, O_WRONLY | O_TRUNC, CM_CONFIG_MODE);
     if (fd == -1) {
         cm_errno(cfg_path);
         return -1;
@@ -499,13 +628,18 @@ int append_district_log(const char *district,
         return -1;
     }
 
+    if (check_role_access(log_path, role, 0, 1, 0) == -1) {
+        cm_error("operation log write refused for role=%s\n", role);
+        return -1;
+    }
+
     if (localtime_r(&now, &tm_value) == NULL) {
         snprintf(timestamp, sizeof(timestamp), "unknown");
     } else {
         strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", &tm_value);
     }
 
-    fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, 0640);
+    fd = open(log_path, O_WRONLY | O_CREAT | O_APPEND, CM_LOG_MODE);
     if (fd == -1) {
         cm_errno(log_path);
         return -1;
@@ -544,6 +678,38 @@ void format_mode(mode_t mode, char *buf, size_t buflen)
     buf[8] = (mode & S_IWOTH) ? 'w' : '-';
     buf[9] = (mode & S_IXOTH) ? 'x' : '-';
     buf[10] = '\0';
+}
+
+int print_report_file_info(const char *district)
+{
+    char report_path[PATH_MAX];
+    struct stat st;
+    char mode_buf[11];
+    char time_buf[32];
+    struct tm tm_value;
+
+    if (build_report_path(district, report_path, sizeof(report_path)) == -1) {
+        return -1;
+    }
+
+    if (stat(report_path, &st) == -1) {
+        cm_errno(report_path);
+        return -1;
+    }
+
+    format_mode(st.st_mode, mode_buf, sizeof(mode_buf));
+    if (localtime_r(&st.st_mtime, &tm_value) == NULL) {
+        snprintf(time_buf, sizeof(time_buf), "unknown");
+    } else {
+        strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &tm_value);
+    }
+
+    cm_writef(STDOUT_FILENO,
+              "reports.dat: permissions=%s size=%lld modified=%s\n",
+              mode_buf + 1,
+              (long long)st.st_size,
+              time_buf);
+    return 0;
 }
 
 int print_stat_entry(const char *label, const char *path, int use_lstat)

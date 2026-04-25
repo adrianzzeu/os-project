@@ -40,6 +40,7 @@ typedef struct ReportRecord {
 int write_all_at(int fd, const void *buf, size_t count, off_t offset);
 int read_all_at(int fd, void *buf, size_t count, off_t offset);
 int open_store(const char *district, int create, int *fd, ReportStoreHeader *header);
+int shift_records_left(int fd, off_t remove_offset, off_t end_offset);
 void copy_field(char *dest, size_t dest_size, const char *src);
 void format_timestamp(time_t timestamp, char *buf, size_t buflen);
 char *trim(char *text);
@@ -103,6 +104,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
 {
     char path[PATH_MAX];
     struct stat st;
+    int existed = 0;
     int flags = O_RDWR;
 
     if (create) {
@@ -117,11 +119,18 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         return -1;
     }
 
+    if (stat(path, &st) == 0) {
+        existed = 1;
+    } else if (errno != ENOENT) {
+        cm_errno(path);
+        return -1;
+    }
+
     if (create) {
         flags |= O_CREAT;
     }
 
-    *fd = open(path, flags, 0640);
+    *fd = open(path, flags, CM_REPORT_MODE);
     if (*fd == -1) {
         if (!create && errno == ENOENT) {
             cm_error("report store for %s does not exist\n", district);
@@ -131,7 +140,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         return -1;
     }
 
-    if (fchmod(*fd, 0640) == -1) {
+    if (!existed && fchmod(*fd, CM_REPORT_MODE) == -1) {
         cm_errno(path);
         close(*fd);
         return -1;
@@ -181,8 +190,39 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         }
     }
 
-    if (update_latest_symlink(district) == -1) {
+    if (create && update_latest_symlink(district) == -1) {
         close(*fd);
+        return -1;
+    }
+
+    return 0;
+}
+
+int shift_records_left(int fd, off_t remove_offset, off_t end_offset)
+{
+    ReportRecord record;
+    off_t read_offset = remove_offset + (off_t)sizeof(record);
+    off_t write_offset = remove_offset;
+
+    while (read_offset < end_offset) {
+        if (lseek(fd, read_offset, SEEK_SET) == (off_t)-1) {
+            return -1;
+        }
+        if (read(fd, &record, sizeof(record)) != (ssize_t)sizeof(record)) {
+            return -1;
+        }
+        if (lseek(fd, write_offset, SEEK_SET) == (off_t)-1) {
+            return -1;
+        }
+        if (write(fd, &record, sizeof(record)) != (ssize_t)sizeof(record)) {
+            return -1;
+        }
+
+        read_offset += (off_t)sizeof(record);
+        write_offset += (off_t)sizeof(record);
+    }
+
+    if (ftruncate(fd, end_offset - (off_t)sizeof(record)) == -1) {
         return -1;
     }
 
@@ -344,11 +384,36 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
 
     copy_field(buffer, sizeof(buffer), expression);
 
-    for (token = strtok(buffer, ","); token != NULL; token = strtok(NULL, ",")) {
+    for (token = strtok(buffer, ", "); token != NULL; token = strtok(NULL, ", ")) {
         char *part = trim(token);
         int value;
 
-        if (strncmp(part, "severity>=", 10) == 0) {
+        if (strncmp(part, "severity:>=", 11) == 0) {
+            if (parse_int_value(part + 11, &value) == -1) {
+                cm_error("invalid severity filter: %s\n", part);
+                return -1;
+            }
+            filter->min_severity = value;
+        } else if (strncmp(part, "severity:<=", 11) == 0) {
+            if (parse_int_value(part + 11, &value) == -1) {
+                cm_error("invalid severity filter: %s\n", part);
+                return -1;
+            }
+            filter->max_severity = value;
+        } else if (strncmp(part, "severity:==", 11) == 0) {
+            if (parse_int_value(part + 11, &value) == -1) {
+                cm_error("invalid severity filter: %s\n", part);
+                return -1;
+            }
+            filter->min_severity = value;
+            filter->max_severity = value;
+        } else if (strncmp(part, "category:==", 11) == 0) {
+            copy_field(filter->category, sizeof(filter->category), part + 11);
+        } else if (strncmp(part, "inspector:==", 12) == 0) {
+            copy_field(filter->inspector, sizeof(filter->inspector), part + 12);
+        } else if (strncmp(part, "text:==", 7) == 0) {
+            copy_field(filter->text, sizeof(filter->text), part + 7);
+        } else if (strncmp(part, "severity>=", 10) == 0) {
             if (parse_int_value(part + 10, &value) == -1) {
                 cm_error("invalid severity filter: %s\n", part);
                 return -1;
@@ -405,7 +470,10 @@ int parse_filter_expression(const char *expression, ReportFilter *filter)
     return 0;
 }
 
-int add_report(const char *district, const ReportInput *input, unsigned int *created_id)
+int add_report(const char *district,
+               const ReportInput *input,
+               const char *role,
+               unsigned int *created_id)
 {
     int fd;
     int threshold;
@@ -413,9 +481,24 @@ int add_report(const char *district, const ReportInput *input, unsigned int *cre
     ReportRecord record;
     off_t offset;
     char created[32];
+    char report_path[PATH_MAX];
+    struct stat st;
 
-    if (read_severity_threshold(district, &threshold) == -1 ||
-        open_store(district, 1, &fd, &header) == -1) {
+    if (read_severity_threshold(district, role, &threshold) == -1 ||
+        build_report_path(district, report_path, sizeof(report_path)) == -1) {
+        return -1;
+    }
+
+    if (stat(report_path, &st) == 0) {
+        if (check_role_access(report_path, role, 1, 1, 0) == -1) {
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        cm_errno(report_path);
+        return -1;
+    }
+
+    if (open_store(district, 1, &fd, &header) == -1) {
         return -1;
     }
 
@@ -473,14 +556,28 @@ int add_report(const char *district, const ReportInput *input, unsigned int *cre
     return 0;
 }
 
-int remove_report(const char *district, unsigned int id)
+int remove_report(const char *district, unsigned int id, const char *role)
 {
     int fd;
     ReportStoreHeader header;
     ReportRecord record;
     off_t offset;
+    off_t end_offset;
+    char report_path[PATH_MAX];
+
+    if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
+        check_role_access(report_path, role, 1, 1, 0) == -1) {
+        return -1;
+    }
 
     if (open_store(district, 0, &fd, &header) == -1) {
+        return -1;
+    }
+
+    end_offset = lseek(fd, 0, SEEK_END);
+    if (end_offset == (off_t)-1) {
+        cm_errno("lseek");
+        close(fd);
         return -1;
     }
 
@@ -506,18 +603,7 @@ int remove_report(const char *district, unsigned int id)
         }
 
         if (record.id == id) {
-            if (!record.active) {
-                cm_writef(STDOUT_FILENO,
-                          "Report %u in %s is already removed\n",
-                          id,
-                          district);
-                close(fd);
-                return 0;
-            }
-
-            record.active = 0;
-
-            if (write_all_at(fd, &record, sizeof(record), offset) == -1 ||
+            if (shift_records_left(fd, offset, end_offset) == -1 ||
                 fsync(fd) == -1) {
                 cm_errno("remove report");
                 close(fd);
@@ -535,7 +621,7 @@ int remove_report(const char *district, unsigned int id)
     return -1;
 }
 
-int list_reports(const char *district, const ReportFilter *filter)
+int list_reports(const char *district, const ReportFilter *filter, const char *role)
 {
     int fd;
     ReportStoreHeader header;
@@ -543,7 +629,12 @@ int list_reports(const char *district, const ReportFilter *filter)
     off_t offset;
     int matches = 0;
 
-    if (open_store(district, 0, &fd, &header) == -1) {
+    char report_path[PATH_MAX];
+
+    if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
+        check_role_access(report_path, role, 1, 0, 0) == -1 ||
+        print_report_file_info(district) == -1 ||
+        open_store(district, 0, &fd, &header) == -1) {
         return -1;
     }
 
@@ -604,19 +695,22 @@ int list_reports(const char *district, const ReportFilter *filter)
     return 0;
 }
 
-int show_report(const char *district, unsigned int id)
+int show_report(const char *district, unsigned int id, const char *role)
 {
     ReportFilter filter;
     int fd;
     ReportStoreHeader header;
     ReportRecord record;
     off_t offset;
+    char report_path[PATH_MAX];
 
     report_filter_defaults(&filter);
     filter.active = -1;
     filter.id = id;
 
-    if (open_store(district, 0, &fd, &header) == -1) {
+    if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
+        check_role_access(report_path, role, 1, 0, 0) == -1 ||
+        open_store(district, 0, &fd, &header) == -1) {
         return -1;
     }
 

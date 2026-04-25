@@ -20,7 +20,8 @@ typedef enum Command {
     CMD_LIST,
     CMD_SHOW,
     CMD_METADATA,
-    CMD_SET_THRESHOLD
+    CMD_SET_THRESHOLD,
+    CMD_FILTER
 } Command;
 
 void usage(int fd);
@@ -41,15 +42,16 @@ void usage(int fd)
 {
     cm_write_text(fd,
                   "Usage:\n"
-                  "  city_manager --role inspector --user USER --add DISTRICT --lat LAT --lon LON --category CATEGORY --severity 1|2|3 --description TEXT\n"
+                  "  city_manager --role inspector|manager --user USER --add DISTRICT [--lat LAT] [--lon LON] [--category CATEGORY] [--severity 1|2|3] [--description TEXT]\n"
                   "  city_manager --role manager --user USER --remove_report DISTRICT ID\n"
-                  "  city_manager --role manager --user USER --set_threshold DISTRICT 1|2|3\n"
-                  "  city_manager --role inspector|manager --user USER --list DISTRICT [--filter EXPR]\n"
-                  "  city_manager --role inspector|manager --user USER --show DISTRICT ID\n"
+                  "  city_manager --role manager --user USER --update_threshold DISTRICT 1|2|3\n"
+                  "  city_manager --role inspector|manager --user USER --list DISTRICT\n"
+                  "  city_manager --role inspector|manager --user USER --view DISTRICT ID\n"
+                  "  city_manager --role inspector|manager --user USER --filter DISTRICT CONDITION...\n"
                   "  city_manager --role inspector|manager --user USER --metadata DISTRICT\n"
                   "\n"
                   "Each district is stored under data/DISTRICT/ with reports.dat, district.cfg, and logged_district.\n"
-                  "Filter terms are comma separated: severity>=2,category=road,inspector=alice,text=bridge,active=all\n");
+                  "Filter examples: 'severity:>=2' 'category:==road' or severity>=2,category=road\n");
 }
 
 Role parse_role(const char *text)
@@ -140,11 +142,6 @@ int authorize(Role role, Command command)
         return -1;
     }
 
-    if (command == CMD_ADD && role != ROLE_INSPECTOR) {
-        cm_error("permission denied: --add requires role inspector\n");
-        return -1;
-    }
-
     if ((command == CMD_REMOVE_REPORT || command == CMD_SET_THRESHOLD) &&
         role != ROLE_MANAGER) {
         cm_error("permission denied: this command requires role manager\n");
@@ -160,8 +157,9 @@ int log_success(const char *district,
                 const char *action)
 {
     if (append_district_log(district, role_name(role), user, action) == -1) {
-        cm_error("operation succeeded, but logging failed\n");
-        return -1;
+        cm_error("operation succeeded, but logged_district was not updated for role=%s\n",
+                 role_name(role));
+        return 0;
     }
 
     return 0;
@@ -175,14 +173,10 @@ int main(int argc, char **argv)
     ReportFilter filter;
     const char *district = NULL;
     const char *filter_expression = NULL;
+    char filter_buffer[512] = "";
     char declared_user[REPORT_USER_LEN] = "";
     unsigned int id = 0;
     int threshold = 0;
-    int lat_seen = 0;
-    int lon_seen = 0;
-    int category_seen = 0;
-    int severity_seen = 0;
-    int description_seen = 0;
     int i;
     int result;
     char action[256];
@@ -239,13 +233,14 @@ int main(int argc, char **argv)
                 cm_error("report id must be a positive integer\n");
                 return 2;
             }
-        } else if (strcmp(argv[i], "--set_threshold") == 0) {
+        } else if (strcmp(argv[i], "--set_threshold") == 0 ||
+                   strcmp(argv[i], "--update_threshold") == 0) {
             if (set_command(&command, CMD_SET_THRESHOLD) == -1 ||
-                need_arg(argc, argv, i, "--set_threshold") == -1) {
+                need_arg(argc, argv, i, argv[i]) == -1) {
                 return 2;
             }
             district = argv[++i];
-            if (need_arg(argc, argv, i, "--set_threshold VALUE") == -1) {
+            if (need_arg(argc, argv, i, "--update_threshold VALUE") == -1) {
                 return 2;
             }
             if (parse_severity_arg(argv[++i], &threshold) == -1) {
@@ -258,13 +253,14 @@ int main(int argc, char **argv)
                 return 2;
             }
             district = argv[++i];
-        } else if (strcmp(argv[i], "--show") == 0) {
+        } else if (strcmp(argv[i], "--show") == 0 ||
+                   strcmp(argv[i], "--view") == 0) {
             if (set_command(&command, CMD_SHOW) == -1 ||
-                need_arg(argc, argv, i, "--show") == -1) {
+                need_arg(argc, argv, i, argv[i]) == -1) {
                 return 2;
             }
             district = argv[++i];
-            if (need_arg(argc, argv, i, "--show ID") == -1) {
+            if (need_arg(argc, argv, i, "--view ID") == -1) {
                 return 2;
             }
             if (parse_u32(argv[++i], &id) == -1 || id == 0) {
@@ -283,14 +279,12 @@ int main(int argc, char **argv)
                 cm_error("--lat must be a floating-point number\n");
                 return 2;
             }
-            lat_seen = 1;
         } else if (strcmp(argv[i], "--lon") == 0) {
             if (need_arg(argc, argv, i, "--lon") == -1 ||
                 parse_double_arg(argv[++i], &input.longitude) == -1) {
                 cm_error("--lon must be a floating-point number\n");
                 return 2;
             }
-            lon_seen = 1;
         } else if (strcmp(argv[i], "--category") == 0) {
             if (need_arg(argc, argv, i, "--category") == -1) {
                 return 2;
@@ -302,7 +296,6 @@ int main(int argc, char **argv)
                             "--category") == -1) {
                 return 2;
             }
-            category_seen = 1;
         } else if (strcmp(argv[i], "--description") == 0) {
             if (need_arg(argc, argv, i, "--description") == -1) {
                 return 2;
@@ -313,19 +306,42 @@ int main(int argc, char **argv)
                             "--description") == -1) {
                 return 2;
             }
-            description_seen = 1;
         } else if (strcmp(argv[i], "--severity") == 0) {
             if (need_arg(argc, argv, i, "--severity") == -1 ||
                 parse_severity_arg(argv[++i], &input.severity) == -1) {
                 cm_error("--severity must be 1, 2, or 3\n");
                 return 2;
             }
-            severity_seen = 1;
         } else if (strcmp(argv[i], "--filter") == 0) {
-            if (need_arg(argc, argv, i, "--filter") == -1) {
-                return 2;
+            if (command == CMD_LIST) {
+                if (need_arg(argc, argv, i, "--filter") == -1) {
+                    return 2;
+                }
+                filter_expression = argv[++i];
+            } else {
+                size_t used = 0;
+
+                if (set_command(&command, CMD_FILTER) == -1 ||
+                    need_arg(argc, argv, i, "--filter") == -1) {
+                    return 2;
+                }
+                district = argv[++i];
+
+                while (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) {
+                    size_t len = strlen(argv[i + 1]);
+                    if (used + len + 2 >= sizeof(filter_buffer)) {
+                        cm_error("--filter expression is too long\n");
+                        return 2;
+                    }
+                    if (used > 0) {
+                        filter_buffer[used++] = ' ';
+                    }
+                    memcpy(filter_buffer + used, argv[i + 1], len + 1);
+                    used += len;
+                    i++;
+                }
+                filter_expression = filter_buffer;
             }
-            filter_expression = argv[++i];
         } else {
             cm_error("unknown option: %s\n", argv[i]);
             usage(STDERR_FILENO);
@@ -352,11 +368,6 @@ int main(int argc, char **argv)
     }
 
     if (command == CMD_ADD) {
-        if (!lat_seen || !lon_seen || !category_seen ||
-            !severity_seen || !description_seen) {
-            cm_error("--add requires --lat, --lon, --category, --severity, and --description\n");
-            return 2;
-        }
         if (copy_option(input.inspector,
                         sizeof(input.inspector),
                         declared_user,
@@ -374,28 +385,31 @@ int main(int argc, char **argv)
 
     switch (command) {
     case CMD_ADD:
-        result = add_report(district, &input, &created_id);
+        result = add_report(district, &input, role_name(role), &created_id);
         if (result == 0) {
             snprintf(action, sizeof(action), "add report_id=%u", created_id);
         }
         break;
     case CMD_REMOVE_REPORT:
-        result = remove_report(district, id);
+        result = remove_report(district, id, role_name(role));
         if (result == 0) {
             snprintf(action, sizeof(action), "remove_report report_id=%u", id);
         }
         break;
     case CMD_LIST:
-        result = list_reports(district, &filter);
+        result = list_reports(district, &filter, role_name(role));
         if (result == 0) {
-            snprintf(action,
-                     sizeof(action),
-                     "list filter=%s",
-                     filter_expression == NULL ? "none" : filter_expression);
+            snprintf(action, sizeof(action), "list");
+        }
+        break;
+    case CMD_FILTER:
+        result = list_reports(district, &filter, role_name(role));
+        if (result == 0) {
+            snprintf(action, sizeof(action), "filter");
         }
         break;
     case CMD_SHOW:
-        result = show_report(district, id);
+        result = show_report(district, id, role_name(role));
         if (result == 0) {
             snprintf(action, sizeof(action), "show report_id=%u", id);
         }
@@ -407,7 +421,7 @@ int main(int argc, char **argv)
         }
         break;
     case CMD_SET_THRESHOLD:
-        result = write_severity_threshold(district, threshold);
+        result = write_severity_threshold(district, role_name(role), threshold);
         if (result == 0) {
             cm_writef(STDOUT_FILENO,
                       "Set severity threshold for %s to %d\n",

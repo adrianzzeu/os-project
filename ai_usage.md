@@ -31,6 +31,19 @@ system-call-oriented.
   reports print an escalation alert when they meet the threshold.
 - I added operation logging so successful actions write the timestamp, declared
   role, declared user, and action into `logged_district`.
+- I added the permission-bit simulation required by the assignment:
+  district directories use `750`, `reports.dat` uses `664`, `district.cfg`
+  uses `640`, and `logged_district` uses `644`.
+- I added role-based permission checks using `stat()` and the permission bits
+  from `st_mode`, where managers are treated as owners and inspectors are
+  treated as group users.
+- I changed `remove_report` so it physically removes a record by shifting later
+  fixed-size records with `lseek()` and truncating the file with
+  `ftruncate()`.
+- I updated commands toward the assignment naming, including `view`,
+  `update_threshold`, and `filter`.
+- I made `list` print the current symbolic permissions, file size, and
+  modification time for `reports.dat`.
 
 ### Where AI guided me
 
@@ -48,6 +61,9 @@ system-call-oriented.
 - AI gave me a little guidance while I changed the district layout and record
   format, but I directed the changes and kept the implementation aligned with
   my assignment requirements.
+- I implemented the permission-bit simulation mostly myself, with only a small
+  amount of AI help to check edge cases like exact `district.cfg` permissions,
+  symbolic permission output, and physical record deletion.
 - AI guided me in testing compile errors, warning flags, and the main command
   flows.
 
@@ -60,6 +76,8 @@ system-call-oriented.
   is an Operating Systems project.
 - I gave the exact directory and file layout that the project needed, and I
   used AI mostly to help check the details while I implemented it.
+- I gave the exact permission table and command behavior from the assignment,
+  then used AI for small implementation checks while I made the changes.
 - I corrected the AI usage wording so it reflects that I did the project and AI
   only gave guidance where I needed it.
 - Most of the direction came from me; AI was mainly used for small checks,

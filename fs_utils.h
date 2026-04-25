@@ -10,6 +10,10 @@
 #define CM_LOG_FILE "logged_district"
 #define CM_LATEST_LINK "latest_report"
 #define CM_DEFAULT_THRESHOLD 3
+#define CM_DISTRICT_MODE 0750
+#define CM_REPORT_MODE 0664
+#define CM_CONFIG_MODE 0640
+#define CM_LOG_MODE 0644
 
 int cm_write_all(int fd, const char *buf, size_t count);
 int cm_writef(int fd, const char *format, ...);
@@ -27,8 +31,20 @@ int build_config_path(const char *district, char *buf, size_t buflen);
 int build_log_path(const char *district, char *buf, size_t buflen);
 int build_latest_link_path(const char *district, char *buf, size_t buflen);
 int update_latest_symlink(const char *district);
-int read_severity_threshold(const char *district, int *threshold);
-int write_severity_threshold(const char *district, int threshold);
+int role_has_access(mode_t mode,
+                    const char *role,
+                    int need_read,
+                    int need_write,
+                    int need_execute);
+int check_role_access(const char *path,
+                      const char *role,
+                      int need_read,
+                      int need_write,
+                      int need_execute);
+int check_exact_permissions(const char *path, mode_t expected, const char *label);
+int print_report_file_info(const char *district);
+int read_severity_threshold(const char *district, const char *role, int *threshold);
+int write_severity_threshold(const char *district, const char *role, int threshold);
 int append_district_log(const char *district,
                         const char *role,
                         const char *user,

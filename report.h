@@ -30,9 +30,12 @@ void report_input_defaults(ReportInput *input);
 void report_filter_defaults(ReportFilter *filter);
 int parse_filter_expression(const char *expression, ReportFilter *filter);
 
-int add_report(const char *district, const ReportInput *input, unsigned int *created_id);
-int remove_report(const char *district, unsigned int id);
-int list_reports(const char *district, const ReportFilter *filter);
-int show_report(const char *district, unsigned int id);
+int add_report(const char *district,
+               const ReportInput *input,
+               const char *role,
+               unsigned int *created_id);
+int remove_report(const char *district, unsigned int id, const char *role);
+int list_reports(const char *district, const ReportFilter *filter, const char *role);
+int show_report(const char *district, unsigned int id, const char *role);
 
 #endif
