@@ -2,10 +2,27 @@
 #define REPORT_H
 
 #include <stdint.h>
+#include <time.h>
 
 #define REPORT_USER_LEN 64
 #define REPORT_CATEGORY_LEN 48
 #define REPORT_DESCRIPTION_LEN 320
+#define REPORT_CONDITION_FIELD_LEN 32
+#define REPORT_CONDITION_OP_LEN 3
+#define REPORT_CONDITION_VALUE_LEN 320
+
+typedef struct Report {
+    uint32_t id;
+    char inspector[REPORT_USER_LEN];
+    double latitude;
+    double longitude;
+    char category[REPORT_CATEGORY_LEN];
+    int32_t severity;
+    time_t timestamp;
+    char description[REPORT_DESCRIPTION_LEN];
+    uint8_t active;
+    uint8_t reserved[7];
+} Report;
 
 typedef struct ReportInput {
     char inspector[REPORT_USER_LEN];
@@ -28,6 +45,8 @@ typedef struct ReportFilter {
 
 void report_input_defaults(ReportInput *input);
 void report_filter_defaults(ReportFilter *filter);
+int parse_condition(const char *input, char *field, char *op, char *value);
+int match_condition(Report *r, const char *field, const char *op, const char *value);
 int parse_filter_expression(const char *expression, ReportFilter *filter);
 
 int add_report(const char *district,
@@ -36,6 +55,10 @@ int add_report(const char *district,
                unsigned int *created_id);
 int remove_report(const char *district, unsigned int id, const char *role);
 int list_reports(const char *district, const ReportFilter *filter, const char *role);
+int filter_reports(const char *district,
+                   const char **conditions,
+                   int condition_count,
+                   const char *role);
 int show_report(const char *district, unsigned int id, const char *role);
 
 #endif

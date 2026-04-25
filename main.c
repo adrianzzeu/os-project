@@ -173,7 +173,8 @@ int main(int argc, char **argv)
     ReportFilter filter;
     const char *district = NULL;
     const char *filter_expression = NULL;
-    char filter_buffer[512] = "";
+    const char *conditions[16];
+    int condition_count = 0;
     char declared_user[REPORT_USER_LEN] = "";
     unsigned int id = 0;
     int threshold = 0;
@@ -319,8 +320,6 @@ int main(int argc, char **argv)
                 }
                 filter_expression = argv[++i];
             } else {
-                size_t used = 0;
-
                 if (set_command(&command, CMD_FILTER) == -1 ||
                     need_arg(argc, argv, i, "--filter") == -1) {
                     return 2;
@@ -328,19 +327,17 @@ int main(int argc, char **argv)
                 district = argv[++i];
 
                 while (i + 1 < argc && strncmp(argv[i + 1], "--", 2) != 0) {
-                    size_t len = strlen(argv[i + 1]);
-                    if (used + len + 2 >= sizeof(filter_buffer)) {
-                        cm_error("--filter expression is too long\n");
+                    if (condition_count >= 16) {
+                        cm_error("--filter supports at most 16 conditions\n");
                         return 2;
                     }
-                    if (used > 0) {
-                        filter_buffer[used++] = ' ';
-                    }
-                    memcpy(filter_buffer + used, argv[i + 1], len + 1);
-                    used += len;
+                    conditions[condition_count++] = argv[i + 1];
                     i++;
                 }
-                filter_expression = filter_buffer;
+                if (condition_count == 0) {
+                    cm_error("--filter requires at least one condition\n");
+                    return 2;
+                }
             }
         } else {
             cm_error("unknown option: %s\n", argv[i]);
@@ -376,7 +373,8 @@ int main(int argc, char **argv)
         }
     }
 
-    if (filter_expression != NULL &&
+    if (command != CMD_FILTER &&
+        filter_expression != NULL &&
         parse_filter_expression(filter_expression, &filter) == -1) {
         return 2;
     }
@@ -403,7 +401,10 @@ int main(int argc, char **argv)
         }
         break;
     case CMD_FILTER:
-        result = list_reports(district, &filter, role_name(role));
+        result = filter_reports(district,
+                                conditions,
+                                condition_count,
+                                role_name(role));
         if (result == 0) {
             snprintf(action, sizeof(action), "filter");
         }

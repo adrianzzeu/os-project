@@ -16,6 +16,7 @@ int create_empty_log(const char *path);
 int print_stat_entry(const char *label, const char *path, int use_lstat);
 int parse_threshold_value(const char *text, int *threshold);
 void describe_access(int need_read, int need_write, int need_execute, char *buf, size_t buflen);
+int symlink_points_to_existing_file(const char *link_path);
 
 int cm_write_all(int fd, const char *buf, size_t count)
 {
@@ -284,6 +285,23 @@ int build_latest_link_path(const char *district, char *buf, size_t buflen)
     return 0;
 }
 
+int build_active_link_path(const char *district, char *buf, size_t buflen)
+{
+    int written;
+
+    if (validate_name(district, "district") == -1) {
+        return -1;
+    }
+
+    written = snprintf(buf, buflen, "%s%s", CM_ACTIVE_LINK_PREFIX, district);
+    if (written < 0 || (size_t)written >= buflen) {
+        cm_error("active reports symlink path is too long for district %s\n", district);
+        return -1;
+    }
+
+    return 0;
+}
+
 int write_default_config(const char *path)
 {
     int fd;
@@ -502,6 +520,77 @@ int update_latest_symlink(const char *district)
         return -1;
     }
 
+    if (update_active_report_symlink(district) == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
+int symlink_points_to_existing_file(const char *link_path)
+{
+    struct stat st;
+
+    if (stat(link_path, &st) == -1) {
+        if (errno == ENOENT) {
+            return 0;
+        }
+        cm_errno(link_path);
+        return -1;
+    }
+
+    return S_ISREG(st.st_mode) ? 1 : 0;
+}
+
+int update_active_report_symlink(const char *district)
+{
+    char link_path[PATH_MAX];
+    char target[PATH_MAX];
+    struct stat st;
+    int written;
+
+    if (build_active_link_path(district, link_path, sizeof(link_path)) == -1) {
+        return -1;
+    }
+
+    written = snprintf(target,
+                       sizeof(target),
+                       "%s/%s/%s",
+                       CM_DATA_DIR,
+                       district,
+                       CM_REPORT_FILE);
+    if (written < 0 || (size_t)written >= sizeof(target)) {
+        cm_error("active reports symlink target is too long for district %s\n", district);
+        return -1;
+    }
+
+    if (lstat(link_path, &st) == -1) {
+        if (errno != ENOENT) {
+            cm_errno(link_path);
+            return -1;
+        }
+    } else if (!S_ISLNK(st.st_mode)) {
+        cm_error("%s exists but is not a symbolic link\n", link_path);
+        return -1;
+    } else {
+        int target_ok = symlink_points_to_existing_file(link_path);
+        if (target_ok == 0) {
+            cm_error("warning: dangling symlink detected and replaced: %s\n", link_path);
+        } else if (target_ok == -1) {
+            return -1;
+        }
+
+        if (unlink(link_path) == -1) {
+            cm_errno(link_path);
+            return -1;
+        }
+    }
+
+    if (symlink(target, link_path) == -1) {
+        cm_errno(link_path);
+        return -1;
+    }
+
     return 0;
 }
 
@@ -712,6 +801,59 @@ int print_report_file_info(const char *district)
     return 0;
 }
 
+int print_active_report_link_metadata(const char *district)
+{
+    char link_path[PATH_MAX];
+    char target[PATH_MAX];
+    struct stat lst;
+    ssize_t len;
+
+    if (build_active_link_path(district, link_path, sizeof(link_path)) == -1) {
+        return -1;
+    }
+
+    if (lstat(link_path, &lst) == -1) {
+        if (errno == ENOENT) {
+            cm_writef(STDOUT_FILENO,
+                      "Active reports symlink: missing (%s)\n",
+                      link_path);
+            return 0;
+        }
+        cm_errno(link_path);
+        return -1;
+    }
+
+    if (!S_ISLNK(lst.st_mode)) {
+        cm_writef(STDOUT_FILENO,
+                  "Active reports symlink: %s exists but is not a symlink\n",
+                  link_path);
+        return 0;
+    }
+
+    len = readlink(link_path, target, sizeof(target) - 1);
+    if (len == -1) {
+        cm_errno(link_path);
+        return -1;
+    }
+    target[len] = '\0';
+
+    cm_writef(STDOUT_FILENO,
+              "Active reports symlink: %s -> %s\n",
+              link_path,
+              target);
+
+    int target_ok = symlink_points_to_existing_file(link_path);
+    if (target_ok == 0) {
+        cm_writef(STDOUT_FILENO,
+                  "warning: dangling symlink detected: %s\n",
+                  link_path);
+    } else if (target_ok == -1) {
+        return -1;
+    }
+
+    return 0;
+}
+
 int print_stat_entry(const char *label, const char *path, int use_lstat)
 {
     struct stat st;
@@ -768,7 +910,8 @@ int print_file_metadata(const char *district)
         print_stat_entry("Binary reports", report_path, 0) == -1 ||
         print_stat_entry("Config", cfg_path, 0) == -1 ||
         print_stat_entry("Operation log", log_path, 0) == -1 ||
-        print_stat_entry("Report symlink", link_path, 1) == -1) {
+        print_stat_entry("Report symlink", link_path, 1) == -1 ||
+        print_active_report_link_metadata(district) == -1) {
         return -1;
     }
 

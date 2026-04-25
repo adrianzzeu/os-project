@@ -9,6 +9,7 @@
 #define CM_CONFIG_FILE "district.cfg"
 #define CM_LOG_FILE "logged_district"
 #define CM_LATEST_LINK "latest_report"
+#define CM_ACTIVE_LINK_PREFIX "active_reports-"
 #define CM_DEFAULT_THRESHOLD 3
 #define CM_DISTRICT_MODE 0750
 #define CM_REPORT_MODE 0664
@@ -30,7 +31,10 @@ int build_report_path(const char *district, char *buf, size_t buflen);
 int build_config_path(const char *district, char *buf, size_t buflen);
 int build_log_path(const char *district, char *buf, size_t buflen);
 int build_latest_link_path(const char *district, char *buf, size_t buflen);
+int build_active_link_path(const char *district, char *buf, size_t buflen);
 int update_latest_symlink(const char *district);
+int update_active_report_symlink(const char *district);
+int print_active_report_link_metadata(const char *district);
 int role_has_access(mode_t mode,
                     const char *role,
                     int need_read,

@@ -44,6 +44,18 @@ system-call-oriented.
   `update_threshold`, and `filter`.
 - I made `list` print the current symbolic permissions, file size, and
   modification time for `reports.dat`.
+- I added the Phase 1 AI-assisted condition matching functions:
+  `parse_condition()` and `match_condition()`.
+- I updated the `filter` command so it accepts one or more conditions like
+  `severity:>=2` and `category:==road`, parses each condition, reads
+  `reports.dat` record by record with `read()`, and prints records only when
+  every condition matches.
+- I added support for filtering by `severity`, `category`, `inspector`, and
+  `timestamp`, with operators `=`, `==`, `!=`, `<`, `<=`, `>`, and `>=`.
+- I added root-level `active_reports-<district>` symbolic links pointing to
+  `data/<district>/reports.dat`.
+- I used `lstat()` when checking symlinks and added warnings for dangling
+  `active_reports-*` links instead of crashing.
 
 ### Where AI guided me
 
@@ -64,6 +76,14 @@ system-call-oriented.
 - I implemented the permission-bit simulation mostly myself, with only a small
   amount of AI help to check edge cases like exact `district.cfg` permissions,
   symbolic permission output, and physical record deletion.
+- I used AI as a second-pass helper for the two required condition-matching
+  functions. I described my record layout and fields, then reviewed the
+  generated parsing and matching logic and adjusted it to fit my code.
+- I implemented the final `filter` command integration myself, using AI mainly
+  to check that it opened the report file, read records one by one, and applied
+  all conditions with AND logic.
+- AI helped me double-check the root `active_reports-*` symbolic link behavior,
+  especially using `lstat()` and warning about dangling links.
 - AI guided me in testing compile errors, warning flags, and the main command
   flows.
 
@@ -78,6 +98,8 @@ system-call-oriented.
   used AI mostly to help check the details while I implemented it.
 - I gave the exact permission table and command behavior from the assignment,
   then used AI for small implementation checks while I made the changes.
+- I gave the exact Phase 1 filter and symbolic-link requirements, then used AI
+  mainly to help review the required function shapes and edge cases.
 - I corrected the AI usage wording so it reflects that I did the project and AI
   only gave guidance where I needed it.
 - Most of the direction came from me; AI was mainly used for small checks,
@@ -88,7 +110,8 @@ system-call-oriented.
 - The project builds with `./build.sh`.
 - The project also builds with `make`.
 - The program has been tested with add, list, show, metadata, filter, threshold
-  update, inspector denial, manager removal, and operation log creation.
+  update, inspector denial, manager removal, root symbolic link creation, and
+  dangling symbolic link warnings.
 - Generated runtime data is stored under `data/DISTRICT/` and can be recreated
   by running the program.
 

@@ -24,29 +24,22 @@ typedef struct ReportStoreHeader {
     uint32_t reserved;
 } ReportStoreHeader;
 
-typedef struct ReportRecord {
-    uint32_t id;
-    char inspector[REPORT_USER_LEN];
-    double latitude;
-    double longitude;
-    char category[REPORT_CATEGORY_LEN];
-    int32_t severity;
-    time_t timestamp;
-    char description[REPORT_DESCRIPTION_LEN];
-    uint8_t active;
-    uint8_t reserved[7];
-} ReportRecord;
-
 int write_all_at(int fd, const void *buf, size_t count, off_t offset);
 int read_all_at(int fd, void *buf, size_t count, off_t offset);
+int read_exact_fd(int fd, void *buf, size_t count);
 int open_store(const char *district, int create, int *fd, ReportStoreHeader *header);
 int shift_records_left(int fd, off_t remove_offset, off_t end_offset);
 void copy_field(char *dest, size_t dest_size, const char *src);
 void format_timestamp(time_t timestamp, char *buf, size_t buflen);
 char *trim(char *text);
 int parse_int_value(const char *text, int *value);
+int parse_time_value(const char *text, time_t *value);
+int compare_int(long left, const char *op, long right);
+int compare_string(const char *left, const char *op, const char *right);
 int contains_case_insensitive(const char *haystack, const char *needle);
-int record_matches_filter(const ReportRecord *record, const ReportFilter *filter);
+int record_matches_filter(const Report *record, const ReportFilter *filter);
+void print_report_table_header(void);
+void print_report_table_row(const Report *record);
 
 int write_all_at(int fd, const void *buf, size_t count, off_t offset)
 {
@@ -84,6 +77,29 @@ int read_all_at(int fd, void *buf, size_t count, off_t offset)
                               cursor + read_total,
                               count - read_total,
                               offset + (off_t)read_total);
+        if (nread == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        if (nread == 0) {
+            errno = EIO;
+            return -1;
+        }
+        read_total += (size_t)nread;
+    }
+
+    return 0;
+}
+
+int read_exact_fd(int fd, void *buf, size_t count)
+{
+    char *cursor = (char *)buf;
+    size_t read_total = 0;
+
+    while (read_total < count) {
+        ssize_t nread = read(fd, cursor + read_total, count - read_total);
         if (nread == -1) {
             if (errno == EINTR) {
                 continue;
@@ -162,7 +178,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         memset(header, 0, sizeof(*header));
         memcpy(header->magic, REPORT_MAGIC, sizeof(header->magic));
         header->version = REPORT_STORE_VERSION;
-        header->record_size = (uint32_t)sizeof(ReportRecord);
+        header->record_size = (uint32_t)sizeof(Report);
         header->next_id = 1;
 
         if (write_all_at(*fd, header, sizeof(*header), 0) == -1) {
@@ -183,7 +199,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
         }
         if (memcmp(header->magic, REPORT_MAGIC, sizeof(header->magic)) != 0 ||
             header->version != REPORT_STORE_VERSION ||
-            header->record_size != sizeof(ReportRecord)) {
+            header->record_size != sizeof(Report)) {
             cm_error("%s has an incompatible report-store format\n", path);
             close(*fd);
             return -1;
@@ -200,7 +216,7 @@ int open_store(const char *district, int create, int *fd, ReportStoreHeader *hea
 
 int shift_records_left(int fd, off_t remove_offset, off_t end_offset)
 {
-    ReportRecord record;
+    Report record;
     off_t read_offset = remove_offset + (off_t)sizeof(record);
     off_t write_offset = remove_offset;
 
@@ -288,6 +304,149 @@ int parse_int_value(const char *text, int *value)
     return 0;
 }
 
+int parse_time_value(const char *text, time_t *value)
+{
+    long long parsed;
+    char *end = NULL;
+
+    errno = 0;
+    parsed = strtoll(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0') {
+        return -1;
+    }
+
+    *value = (time_t)parsed;
+    return 0;
+}
+
+int parse_condition(const char *input, char *field, char *op, char *value)
+{
+    const char *first_colon;
+    const char *rest;
+    const char *ops[] = {"==", "!=", "<=", ">=", "<", ">", "="};
+    size_t field_len;
+    size_t i;
+
+    if (input == NULL || field == NULL || op == NULL || value == NULL) {
+        return -1;
+    }
+
+    first_colon = strchr(input, ':');
+    if (first_colon == NULL || first_colon == input) {
+        return -1;
+    }
+
+    field_len = (size_t)(first_colon - input);
+    if (field_len >= REPORT_CONDITION_FIELD_LEN) {
+        return -1;
+    }
+
+    memcpy(field, input, field_len);
+    field[field_len] = '\0';
+    rest = first_colon + 1;
+
+    for (i = 0; i < sizeof(ops) / sizeof(ops[0]); i++) {
+        size_t op_len = strlen(ops[i]);
+        if (strncmp(rest, ops[i], op_len) == 0) {
+            const char *value_start = rest + op_len;
+            if (*value_start == ':') {
+                value_start++;
+            }
+            if (*value_start == '\0' ||
+                strlen(value_start) >= REPORT_CONDITION_VALUE_LEN) {
+                return -1;
+            }
+            snprintf(op, REPORT_CONDITION_OP_LEN, "%s", ops[i]);
+            snprintf(value, REPORT_CONDITION_VALUE_LEN, "%s", value_start);
+            return 0;
+        }
+    }
+
+    return -1;
+}
+
+int compare_int(long left, const char *op, long right)
+{
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0) {
+        return left == right;
+    }
+    if (strcmp(op, "!=") == 0) {
+        return left != right;
+    }
+    if (strcmp(op, "<") == 0) {
+        return left < right;
+    }
+    if (strcmp(op, "<=") == 0) {
+        return left <= right;
+    }
+    if (strcmp(op, ">") == 0) {
+        return left > right;
+    }
+    if (strcmp(op, ">=") == 0) {
+        return left >= right;
+    }
+    return 0;
+}
+
+int compare_string(const char *left, const char *op, const char *right)
+{
+    int cmp = strcmp(left, right);
+
+    if (strcmp(op, "=") == 0 || strcmp(op, "==") == 0) {
+        return cmp == 0;
+    }
+    if (strcmp(op, "!=") == 0) {
+        return cmp != 0;
+    }
+    if (strcmp(op, "<") == 0) {
+        return cmp < 0;
+    }
+    if (strcmp(op, "<=") == 0) {
+        return cmp <= 0;
+    }
+    if (strcmp(op, ">") == 0) {
+        return cmp > 0;
+    }
+    if (strcmp(op, ">=") == 0) {
+        return cmp >= 0;
+    }
+    return 0;
+}
+
+int match_condition(Report *r, const char *field, const char *op, const char *value)
+{
+    int numeric_value;
+    time_t timestamp_value;
+
+    if (r == NULL || field == NULL || op == NULL || value == NULL) {
+        return 0;
+    }
+
+    if (strcmp(field, "severity") == 0) {
+        if (parse_int_value(value, &numeric_value) == -1) {
+            return 0;
+        }
+        return compare_int((long)r->severity, op, (long)numeric_value);
+    }
+
+    if (strcmp(field, "timestamp") == 0) {
+        if (parse_time_value(value, &timestamp_value) == -1) {
+            return 0;
+        }
+        return compare_int((long)r->timestamp, op, (long)timestamp_value);
+    }
+
+    if (strcmp(field, "category") == 0) {
+        return compare_string(r->category, op, value);
+    }
+
+    if (strcmp(field, "inspector") == 0) {
+        return compare_string(r->inspector, op, value);
+    }
+
+    return 0;
+}
+
 int contains_case_insensitive(const char *haystack, const char *needle)
 {
     size_t needle_len;
@@ -313,7 +472,7 @@ int contains_case_insensitive(const char *haystack, const char *needle)
     return 0;
 }
 
-int record_matches_filter(const ReportRecord *record, const ReportFilter *filter)
+int record_matches_filter(const Report *record, const ReportFilter *filter)
 {
     if (filter == NULL) {
         return record->active != 0;
@@ -478,7 +637,7 @@ int add_report(const char *district,
     int fd;
     int threshold;
     ReportStoreHeader header;
-    ReportRecord record;
+    Report record;
     off_t offset;
     char created[32];
     char report_path[PATH_MAX];
@@ -560,7 +719,7 @@ int remove_report(const char *district, unsigned int id, const char *role)
 {
     int fd;
     ReportStoreHeader header;
-    ReportRecord record;
+    Report record;
     off_t offset;
     off_t end_offset;
     char report_path[PATH_MAX];
@@ -621,11 +780,145 @@ int remove_report(const char *district, unsigned int id, const char *role)
     return -1;
 }
 
+void print_report_table_header(void)
+{
+    cm_writef(STDOUT_FILENO,
+              "%-5s %-3s %-6s %-19s %-14s %-10s %-11s %-11s %s\n",
+              "ID",
+              "Sev",
+              "Active",
+              "Timestamp",
+              "Inspector",
+              "Category",
+              "Latitude",
+              "Longitude",
+              "Description");
+}
+
+void print_report_table_row(const Report *record)
+{
+    char timestamp[32];
+
+    format_timestamp(record->timestamp, timestamp, sizeof(timestamp));
+    cm_writef(STDOUT_FILENO,
+              "%-5u %-3d %-6s %-19s %-14s %-10s %-11.6f %-11.6f %s\n",
+              record->id,
+              record->severity,
+              record->active ? "yes" : "no",
+              timestamp,
+              record->inspector,
+              record->category,
+              record->latitude,
+              record->longitude,
+              record->description);
+}
+
+int filter_reports(const char *district,
+                   const char **conditions,
+                   int condition_count,
+                   const char *role)
+{
+    char report_path[PATH_MAX];
+    char fields[16][REPORT_CONDITION_FIELD_LEN];
+    char ops[16][REPORT_CONDITION_OP_LEN];
+    char values[16][REPORT_CONDITION_VALUE_LEN];
+    ReportStoreHeader header;
+    Report record;
+    int fd;
+    int i;
+    int matches = 0;
+
+    if (condition_count < 1) {
+        cm_error("filter requires at least one condition\n");
+        return -1;
+    }
+    if (condition_count > 16) {
+        cm_error("filter supports at most 16 conditions\n");
+        return -1;
+    }
+
+    for (i = 0; i < condition_count; i++) {
+        if (parse_condition(conditions[i], fields[i], ops[i], values[i]) == -1) {
+            cm_error("invalid filter condition: %s\n", conditions[i]);
+            return -1;
+        }
+    }
+
+    if (build_report_path(district, report_path, sizeof(report_path)) == -1 ||
+        check_role_access(report_path, role, 1, 0, 0) == -1 ||
+        print_report_file_info(district) == -1) {
+        return -1;
+    }
+
+    fd = open(report_path, O_RDONLY);
+    if (fd == -1) {
+        cm_errno(report_path);
+        return -1;
+    }
+
+    if (read_exact_fd(fd, &header, sizeof(header)) == -1) {
+        cm_errno(report_path);
+        close(fd);
+        return -1;
+    }
+
+    if (memcmp(header.magic, REPORT_MAGIC, sizeof(header.magic)) != 0 ||
+        header.version != REPORT_STORE_VERSION ||
+        header.record_size != sizeof(Report)) {
+        cm_error("%s has an incompatible report-store format\n", report_path);
+        close(fd);
+        return -1;
+    }
+
+    print_report_table_header();
+    for (;;) {
+        ssize_t nread = read(fd, &record, sizeof(record));
+        int all_conditions_match = 1;
+
+        if (nread == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            cm_errno(report_path);
+            close(fd);
+            return -1;
+        }
+        if (nread == 0) {
+            break;
+        }
+        if ((size_t)nread != sizeof(record)) {
+            cm_error("report store ended with a partial record\n");
+            close(fd);
+            return -1;
+        }
+
+        if (!record.active) {
+            continue;
+        }
+
+        for (i = 0; i < condition_count; i++) {
+            if (!match_condition(&record, fields[i], ops[i], values[i])) {
+                all_conditions_match = 0;
+                break;
+            }
+        }
+
+        if (all_conditions_match) {
+            print_report_table_row(&record);
+            matches++;
+        }
+    }
+
+    close(fd);
+    cm_writef(STDOUT_FILENO, "%d report(s)\n", matches);
+    return 0;
+}
+
 int list_reports(const char *district, const ReportFilter *filter, const char *role)
 {
     int fd;
     ReportStoreHeader header;
-    ReportRecord record;
+    Report record;
     off_t offset;
     int matches = 0;
 
@@ -638,20 +931,9 @@ int list_reports(const char *district, const ReportFilter *filter, const char *r
         return -1;
     }
 
-    cm_writef(STDOUT_FILENO,
-              "%-5s %-3s %-6s %-19s %-14s %-10s %-11s %-11s %s\n",
-              "ID",
-              "Sev",
-              "Active",
-              "Timestamp",
-              "Inspector",
-              "Category",
-              "Latitude",
-              "Longitude",
-              "Description");
+    print_report_table_header();
     for (offset = (off_t)sizeof(header);; offset += (off_t)sizeof(record)) {
         ssize_t nread = pread(fd, &record, sizeof(record), offset);
-        char timestamp[32];
 
         if (nread == -1) {
             if (errno == EINTR) {
@@ -675,18 +957,7 @@ int list_reports(const char *district, const ReportFilter *filter, const char *r
             continue;
         }
 
-        format_timestamp(record.timestamp, timestamp, sizeof(timestamp));
-        cm_writef(STDOUT_FILENO,
-                  "%-5u %-3d %-6s %-19s %-14s %-10s %-11.6f %-11.6f %s\n",
-                  record.id,
-                  record.severity,
-                  record.active ? "yes" : "no",
-                  timestamp,
-                  record.inspector,
-                  record.category,
-                  record.latitude,
-                  record.longitude,
-                  record.description);
+        print_report_table_row(&record);
         matches++;
     }
 
@@ -700,7 +971,7 @@ int show_report(const char *district, unsigned int id, const char *role)
     ReportFilter filter;
     int fd;
     ReportStoreHeader header;
-    ReportRecord record;
+    Report record;
     off_t offset;
     char report_path[PATH_MAX];
 
