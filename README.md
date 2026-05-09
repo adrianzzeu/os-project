@@ -1,383 +1,92 @@
-# City Manager Infrastructure Reports
+# City Manager Reports
 
-`city_manager` is a C command-line program for storing and managing city
-infrastructure reports by district. It is written for an Operating Systems
-project, so it intentionally uses POSIX system calls for binary file I/O,
-metadata checks, symbolic links, permission-bit simulation, and file updates.
+`city_manager` is a C command-line application for storing and managing city
+infrastructure reports by district.
+
+It was built for an Operating Systems project, so it uses POSIX file,
+directory, process, and signal APIs instead of hiding everything behind
+high-level helpers.
 
 ## Build
-
-Build with the provided script:
-
-```sh
-./build.sh
-```
-
-Or build with `make`:
 
 ```sh
 make
 ```
 
-Both commands create the executables:
-
-```sh
-./city_manager
-./monitor_reports
-```
-
-Clean build output with:
-
-```sh
-make clean
-```
-
-## Roles
-
-The program does not use real Unix users. Instead, every command receives a
-declared role and declared user name:
-
-```sh
-./city_manager --role manager --user alice --add downtown
-./city_manager --role inspector --user bob --list downtown
-```
-
-Supported roles:
-
-- `manager`: treated as the file owner in the permission simulation.
-- `inspector`: treated as the file group user in the permission simulation.
-
-The `--user` value is also stored as the inspector name when adding a report.
-
-## Directory Layout
-
-Each district is stored in its own directory directly under the project folder.
-For example, the project folder may contain:
-
-```text
-downtown/
-  district.cfg
-  logged_district
-  latest_report -> reports.dat
-  reports.dat
-active_reports-downtown -> downtown/reports.dat
-.monitor_pid
-```
-
-File purposes:
-
-- `reports.dat`: binary file containing packed fixed-size `Report` records.
-- `district.cfg`: plain-text district configuration file.
-- `logged_district`: plain-text operation log.
-- `latest_report`: symlink inside the district pointing to `reports.dat`.
-- `active_reports-<district>`: root-level symlink pointing to the district
-  report file.
-- `.monitor_pid`: hidden file created by `monitor_reports` while it is
-  running. It stores the monitor process ID for `city_manager` notifications.
-
-## Permissions
-
-The program sets permissions explicitly when files are created:
-
-| Path | Mode | Meaning |
-| --- | --- | --- |
-| District directory | `750` | Manager full access; inspector read and execute. |
-| `reports.dat` | `664` | Both roles may read; both roles may append/write reports. |
-| `district.cfg` | `640` | Manager may read/write; inspector may read. |
-| `logged_district` | `644` | Anyone may read; only manager may write in the simulation. |
-
-Before role-restricted actions, the program calls `stat()` and checks
-permission bits from `st_mode`. If the declared role does not have the needed
-simulated permission, the command refuses the operation.
-
-Because `logged_district` is mode `644`, inspector commands can complete but
-the final log write is refused with a diagnostic. This demonstrates the
-permission check required by the assignment.
-
-## Binary Report Format
-
-`reports.dat` contains only packed `Report` records. There is no file header.
-
-```text
-offset 0                  -> record 0
-offset sizeof(Report)     -> record 1
-offset 2 * sizeof(Report) -> record 2
-```
-
-Each record contains:
-
-- report ID
-- inspector name from `--user`
-- latitude
-- longitude
-- category
-- severity level
-- timestamp
-- description
-- active flag
-
-The current `Report` struct is defined in `report.h`.
-
-Report IDs are assigned by scanning existing records and using the highest ID
-plus one.
-
-Removing a report physically shifts later records one position left and then
-truncates the file with `ftruncate()`.
-
-## Commands
-
-Show help:
-
-```sh
-./city_manager --help
-```
-
-### Add Report
-
-Both managers and inspectors may add reports:
-
-```sh
-./city_manager --role manager --user alice --add downtown
-```
-
-If report fields are omitted, the program prompts for them:
-
-```text
-Latitude:
-Longitude:
-Category (road/lighting/flooding/other):
-Severity level (1/2/3):
-Description:
-```
-
-All fields can also be passed directly:
-
-```sh
-./city_manager --role inspector --user bob --add downtown \
-  --lat 12.2 \
-  --lon 21.1 \
-  --category road \
-  --severity 3 \
-  --description "Road closed"
-```
-
-If the report severity is greater than or equal to the district threshold, the
-program prints an escalation alert.
-
-When a report is added, `city_manager` reads `.monitor_pid` and sends SIGUSR1
-to that process. It records either a successful monitor notification or an
-explicit "monitor could not be informed" message in `logged_district`.
-
-### List Reports
-
-Both roles may list reports:
-
-```sh
-./city_manager --role inspector --user bob --list downtown
-```
-
-The output includes the current symbolic permission bits, file size, and
-modification time for `reports.dat`.
-
-### View One Report
-
-Both roles may view one report by ID:
-
-```sh
-./city_manager --role manager --user alice --view downtown 1
-```
-
-`--show` is also accepted:
-
-```sh
-./city_manager --role manager --user alice --show downtown 1
-```
-
-### Remove Report
-
-Only managers may remove reports:
-
-```sh
-./city_manager --role manager --user alice --remove_report downtown 1
-```
-
-The implementation finds the matching fixed-size record, shifts all later
-records left, and truncates `reports.dat`.
-
-### Remove District
-
-Only managers may remove an entire district:
-
-```sh
-./city_manager --role manager --user alice --remove_district downtown
-```
-
-The command validates the district name, forks a child process, and the child
-executes:
-
-```sh
-rm -rf -- downtown
-```
-
-After the child exits successfully, `city_manager` unlinks the matching
-`active_reports-<district>` symlink.
-
-### Monitor Reports
-
-Start the monitor in the same directory as the district folders:
-
-```sh
-./monitor_reports
-```
-
-At startup it overwrites `.monitor_pid` with its process ID. It prints a
-message on standard output for each SIGUSR1 notification. It exits only after
-SIGINT, prints an exit message, and deletes `.monitor_pid`.
-
-### Update Severity Threshold
-
-Only managers may update the district threshold:
-
-```sh
-./city_manager --role manager --user alice --update_threshold downtown 2
-```
-
-`--set_threshold` is also accepted:
-
-```sh
-./city_manager --role manager --user alice --set_threshold downtown 2
-```
-
-The command checks that `district.cfg` still has exact mode `640` before
-writing. If the permissions were changed, the command refuses to update it.
-
-### Filter Reports
-
-Both roles may filter reports:
-
-```sh
-./city_manager --role inspector --user bob --filter downtown severity:>=2
-```
-
-Multiple conditions are joined with AND:
-
-```sh
-./city_manager --role inspector --user bob --filter downtown \
-  severity:>=2 \
-  category:==road
-```
-
-Supported fields:
-
-- `severity`
-- `category`
-- `inspector`
-- `timestamp`
-
-Supported operators:
-
-- `=`
-- `==`
-- `!=`
-- `<`
-- `<=`
-- `>`
-- `>=`
-
-Examples:
-
-```sh
-./city_manager --role inspector --user bob --filter downtown severity:>=2
-./city_manager --role inspector --user bob --filter downtown category:==road
-./city_manager --role inspector --user bob --filter downtown inspector:==alice
-./city_manager --role inspector --user bob --filter downtown timestamp:>1777000000
-```
-
-### Metadata
-
-Both roles may print file and symlink metadata:
-
-```sh
-./city_manager --role manager --user alice --metadata downtown
-```
-
-This prints metadata for:
-
-- district directory
-- `reports.dat`
-- `district.cfg`
-- `logged_district`
-- `latest_report`
-- `active_reports-<district>`
-
-The program uses `lstat()` for symlinks so it can inspect the link itself
-instead of following it silently. Dangling `active_reports-*` links are reported
-with a warning.
-
-## Operation Log
-
-Successful actions attempt to append to:
-
-```text
-<district>/logged_district
-```
-
-The log format is:
-
-```text
-<epoch_timestamp> <user> <role> <action>
-```
-
-Example:
-
-```text
-1777149255 alice manager add report_id=1
-```
-
-## Example Session
-
-Build:
+or:
 
 ```sh
 ./build.sh
 ```
 
-Add a report interactively:
+Both commands build:
 
-```sh
-./city_manager --role manager --user alice --add downtown
+```text
+city_manager
+monitor_reports
 ```
 
-Add a report without prompts:
+Clean build files:
 
 ```sh
-./city_manager --role inspector --user bob --add downtown \
-  --lat 42.1 \
-  --lon 21.3 \
-  --category lighting \
-  --severity 2 \
-  --description "Street light outage"
+make clean
 ```
 
-Run the monitor in one terminal and add a report from another terminal:
+## Included Data
+
+The repository includes two districts and six total reports:
+
+```text
+downtown/
+  district.cfg
+  latest_report -> reports.dat
+  logged_district
+  reports.dat      # 3 reports
+
+riverside/
+  district.cfg
+  latest_report -> reports.dat
+  logged_district
+  reports.dat      # 3 reports
+
+active_reports-downtown -> downtown/reports.dat
+active_reports-riverside -> riverside/reports.dat
+```
+
+## Roles
+
+Every command receives a declared role and user:
 
 ```sh
-./monitor_reports
+./city_manager --role manager --user alice --list downtown
+./city_manager --role inspector --user bob --list riverside
+```
+
+Roles:
+
+- `manager`: treated as the file owner.
+- `inspector`: treated as the group user.
+
+Permission layout:
+
+| Item | Mode |
+| --- | --- |
+| district directory | `750` |
+| `reports.dat` | `664` |
+| `district.cfg` | `640` |
+| `logged_district` | `644` |
+
+## Main Commands
+
+Add a report:
+
+```sh
 ./city_manager --role manager --user alice --add downtown \
-  --lat 42.1 \
-  --lon 21.3 \
-  --category lighting \
+  --lat 12.8 \
+  --lon 21.7 \
+  --category flooding \
   --severity 2 \
-  --description "Street light outage"
-```
-
-Inspect generated files:
-
-```sh
-find downtown -maxdepth 1 -printf "%M %p\n"
-cat downtown/district.cfg
-cat downtown/logged_district
-ls -l active_reports-downtown
+  --description "Drain overflow near market"
 ```
 
 List reports:
@@ -386,89 +95,120 @@ List reports:
 ./city_manager --role inspector --user bob --list downtown
 ```
 
-Filter critical reports:
+View one report:
 
 ```sh
-./city_manager --role inspector --user bob --filter downtown severity:>=3
+./city_manager --role manager --user alice --view downtown 1
 ```
 
-Remove a report:
+Filter reports:
+
+```sh
+./city_manager --role inspector --user bob --filter downtown severity:>=2
+./city_manager --role inspector --user bob --filter downtown category:==road
+```
+
+Remove one report:
 
 ```sh
 ./city_manager --role manager --user alice --remove_report downtown 1
 ```
 
-## Checking the Binary File
-
-Use `stat` to confirm the file size is a multiple of `sizeof(Report)`:
+Update district threshold:
 
 ```sh
-stat -c %s downtown/reports.dat
+./city_manager --role manager --user alice --update_threshold downtown 2
 ```
 
-Use `xxd` or `od` to inspect the binary contents:
+Show file metadata:
 
 ```sh
-xxd downtown/reports.dat
+./city_manager --role manager --user alice --metadata downtown
 ```
 
-If `xxd` is not installed:
-
-```sh
-od -Ax -tx1z downtown/reports.dat
-```
-
-For this build, one report is currently 480 bytes on the tested system. The
-exact size depends on the compiled C struct layout.
-
-## System Calls Practiced
-
-The project uses system-call-oriented APIs including:
-
-- `open()`
-- `close()`
-- `read()`
-- `write()`
-- `pread()`
-- `pwrite()`
-- `lseek()`
-- `ftruncate()`
-- `fork()`
-- `exec*()`
-- `waitpid()`
-- `kill()`
-- `sigaction()`
-- `fsync()`
-- `stat()`
-- `lstat()`
-- `mkdir()`
-- `chmod()`
-- `fchmod()`
-- `symlink()`
-- `readlink()`
-- `unlink()`
-
-## Cleanup
-
-Remove build output:
-
-```sh
-make clean
-```
-
-Remove a test district and its root symlink:
+Remove a whole district:
 
 ```sh
 ./city_manager --role manager --user alice --remove_district downtown
 ```
 
-Older test data from earlier versions may exist under `data/`. The current
-program stores new districts directly under `./DISTRICT/`.
+`remove_district` is manager-only. It forks a child process, runs:
 
-## AI Usage Log
+```sh
+rm -rf -- <district>
+```
 
-The required AI usage notes are stored separately in:
+and then removes the matching `active_reports-<district>` symlink.
+
+## Monitor Program
+
+Start the monitor from the project directory:
+
+```sh
+./monitor_reports
+```
+
+Behavior:
+
+- writes its PID to `.monitor_pid`;
+- prints a message when it receives SIGUSR1;
+- exits only after SIGINT;
+- deletes `.monitor_pid` before exiting.
+
+When `city_manager` adds a report, it reads `.monitor_pid` and sends SIGUSR1
+with `kill()`. The district log records either successful notification or an
+explicit monitor failure message.
+
+## Storage
+
+Each `reports.dat` file stores fixed-size binary `Report` records directly:
 
 ```text
-ai_usage.md
+record 0 -> offset 0
+record 1 -> offset sizeof(Report)
+record 2 -> offset 2 * sizeof(Report)
+```
+
+Each district also has:
+
+- `district.cfg`: severity threshold;
+- `logged_district`: timestamped operation log;
+- `latest_report`: symlink to `reports.dat`.
+
+Root-level `active_reports-<district>` symlinks point to each district report
+file.
+
+## System Calls Used
+
+Important APIs used in the project:
+
+```text
+open close read write pread pwrite lseek ftruncate fsync
+stat lstat mkdir chmod fchmod symlink readlink unlink
+fork exec waitpid kill sigaction
+```
+
+The program does not use `signal()`.
+
+## Quick Check
+
+```sh
+make clean && make
+./city_manager --role inspector --user tester --list downtown
+./city_manager --role inspector --user tester --list riverside
+```
+
+Expected sample count:
+
+```text
+downtown: 3 reports
+riverside: 3 reports
+```
+
+## AI Usage
+
+Combined AI usage notes are in:
+
+```text
+AI_usage-phases_1_and_2.md
 ```
