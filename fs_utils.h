@@ -9,6 +9,7 @@
 #define CM_LOG_FILE "logged_district"
 #define CM_LATEST_LINK "latest_report"
 #define CM_ACTIVE_LINK_PREFIX "active_reports-"
+#define CM_MONITOR_PID_FILE ".monitor_pid"
 #define CM_DEFAULT_THRESHOLD 3
 #define CM_DISTRICT_MODE 0750
 #define CM_REPORT_MODE 0664
@@ -52,6 +53,11 @@ int append_district_log(const char *district,
                         const char *role,
                         const char *user,
                         const char *action);
+int append_district_log_message(const char *district,
+                                const char *role,
+                                const char *user,
+                                const char *message);
+int remove_district_tree(const char *district);
 int print_file_metadata(const char *district);
 int parse_u32(const char *text, unsigned int *value);
 void format_mode(mode_t mode, char *buf, size_t buflen);

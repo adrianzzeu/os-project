@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -705,8 +706,6 @@ int append_district_log(const char *district,
                         const char *action)
 {
     char log_path[PATH_MAX];
-    time_t now = time(NULL);
-    int fd;
 
     if (ensure_district_layout(district) == -1 ||
         build_log_path(district, log_path, sizeof(log_path)) == -1) {
@@ -715,6 +714,23 @@ int append_district_log(const char *district,
 
     if (check_role_access(log_path, role, 0, 1, 0) == -1) {
         cm_error("operation log write refused for role=%s\n", role);
+        return -1;
+    }
+
+    return append_district_log_message(district, role, user, action);
+}
+
+int append_district_log_message(const char *district,
+                                const char *role,
+                                const char *user,
+                                const char *message)
+{
+    char log_path[PATH_MAX];
+    time_t now = time(NULL);
+    int fd;
+
+    if (ensure_district_layout(district) == -1 ||
+        build_log_path(district, log_path, sizeof(log_path)) == -1) {
         return -1;
     }
 
@@ -729,7 +745,7 @@ int append_district_log(const char *district,
                   (long long)now,
                   user == NULL ? "unknown" : user,
                   role == NULL ? "unknown" : role,
-                  action == NULL ? "unknown" : action) == -1 ||
+                  message == NULL ? "unknown" : message) == -1 ||
         fsync(fd) == -1) {
         cm_errno(log_path);
         close(fd);
@@ -737,6 +753,88 @@ int append_district_log(const char *district,
     }
 
     close(fd);
+    return 0;
+}
+
+int remove_district_tree(const char *district)
+{
+    char dir[PATH_MAX];
+    char active_link[PATH_MAX];
+    struct stat st;
+    pid_t pid;
+    int status;
+
+    if (build_district_dir(district, dir, sizeof(dir)) == -1 ||
+        build_active_link_path(district, active_link, sizeof(active_link)) == -1) {
+        return -1;
+    }
+
+    if (lstat(dir, &st) == -1) {
+        cm_errno(dir);
+        return -1;
+    }
+    if (!S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode)) {
+        cm_error("%s exists but is not a directory\n", dir);
+        return -1;
+    }
+
+    if (lstat(active_link, &st) == 0) {
+        if (!S_ISLNK(st.st_mode)) {
+            cm_error("%s exists but is not a symbolic link\n", active_link);
+            return -1;
+        }
+    } else if (errno != ENOENT) {
+        cm_errno(active_link);
+        return -1;
+    }
+
+    pid = fork();
+    if (pid == -1) {
+        cm_errno("fork");
+        return -1;
+    }
+
+    if (pid == 0) {
+        execlp("rm", "rm", "-rf", "--", dir, (char *)NULL);
+        cm_errno("exec rm");
+        _exit(127);
+    }
+
+    for (;;) {
+        if (waitpid(pid, &status, 0) == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            cm_errno("waitpid");
+            return -1;
+        }
+        break;
+    }
+
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (WIFEXITED(status)) {
+            cm_error("rm -rf -- %s failed with exit status %d\n",
+                     dir,
+                     WEXITSTATUS(status));
+        } else if (WIFSIGNALED(status)) {
+            cm_error("rm -rf -- %s was terminated by signal %d\n",
+                     dir,
+                     WTERMSIG(status));
+        } else {
+            cm_error("rm -rf -- %s did not complete normally\n", dir);
+        }
+        return -1;
+    }
+
+    if (unlink(active_link) == -1 && errno != ENOENT) {
+        cm_errno(active_link);
+        return -1;
+    }
+
+    cm_writef(STDOUT_FILENO,
+              "Removed district %s and active reports symlink %s\n",
+              district,
+              active_link);
     return 0;
 }
 

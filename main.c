@@ -1,7 +1,10 @@
 #include "fs_utils.h"
 #include "report.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,7 +24,8 @@ typedef enum Command {
     CMD_SHOW,
     CMD_METADATA,
     CMD_SET_THRESHOLD,
-    CMD_FILTER
+    CMD_FILTER,
+    CMD_REMOVE_DISTRICT
 } Command;
 
 void usage(int fd);
@@ -46,6 +50,7 @@ int log_success(const char *district,
                 Role role,
                 const char *user,
                 const char *action);
+int notify_monitor_report_added(unsigned int report_id, char *message, size_t message_size);
 
 void usage(int fd)
 {
@@ -53,6 +58,7 @@ void usage(int fd)
                   "Usage:\n"
                   "  city_manager --role inspector|manager --user USER --add DISTRICT [--lat LAT] [--lon LON] [--category CATEGORY] [--severity 1|2|3] [--description TEXT]\n"
                   "  city_manager --role manager --user USER --remove_report DISTRICT ID\n"
+                  "  city_manager --role manager --user USER --remove_district DISTRICT\n"
                   "  city_manager --role manager --user USER --update_threshold DISTRICT 1|2|3\n"
                   "  city_manager --role inspector|manager --user USER --list DISTRICT\n"
                   "  city_manager --role inspector|manager --user USER --view DISTRICT ID\n"
@@ -291,7 +297,9 @@ int authorize(Role role, Command command)
         return -1;
     }
 
-    if ((command == CMD_REMOVE_REPORT || command == CMD_SET_THRESHOLD) &&
+    if ((command == CMD_REMOVE_REPORT ||
+         command == CMD_REMOVE_DISTRICT ||
+         command == CMD_SET_THRESHOLD) &&
         role != ROLE_MANAGER) {
         cm_error("permission denied: this command requires role manager\n");
         return -1;
@@ -311,6 +319,97 @@ int log_success(const char *district,
         return 0;
     }
 
+    return 0;
+}
+
+int notify_monitor_report_added(unsigned int report_id, char *message, size_t message_size)
+{
+    int fd;
+    char buffer[64];
+    ssize_t nread;
+    char *end = NULL;
+    long parsed_pid;
+
+    if (message == NULL || message_size == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    fd = open(CM_MONITOR_PID_FILE, O_RDONLY);
+    if (fd == -1) {
+        int saved_errno = errno;
+        snprintf(message,
+                 message_size,
+                 "monitor could not be informed for report_id=%u: cannot open %s: %s",
+                 report_id,
+                 CM_MONITOR_PID_FILE,
+                 strerror(saved_errno));
+        return -1;
+    }
+
+    for (;;) {
+        nread = read(fd, buffer, sizeof(buffer) - 1);
+        if (nread == -1 && errno == EINTR) {
+            continue;
+        }
+        break;
+    }
+
+    if (nread == -1) {
+        int saved_errno = errno;
+        close(fd);
+        snprintf(message,
+                 message_size,
+                 "monitor could not be informed for report_id=%u: cannot read %s: %s",
+                 report_id,
+                 CM_MONITOR_PID_FILE,
+                 strerror(saved_errno));
+        return -1;
+    }
+
+    close(fd);
+
+    if (nread == 0) {
+        snprintf(message,
+                 message_size,
+                 "monitor could not be informed for report_id=%u: %s is empty",
+                 report_id,
+                 CM_MONITOR_PID_FILE);
+        return -1;
+    }
+
+    buffer[nread] = '\0';
+    errno = 0;
+    parsed_pid = strtol(buffer, &end, 10);
+    while (end != NULL && isspace((unsigned char)*end)) {
+        end++;
+    }
+
+    if (errno != 0 || end == buffer || (end != NULL && *end != '\0') || parsed_pid <= 0) {
+        snprintf(message,
+                 message_size,
+                 "monitor could not be informed for report_id=%u: invalid PID in %s",
+                 report_id,
+                 CM_MONITOR_PID_FILE);
+        return -1;
+    }
+
+    if (kill((pid_t)parsed_pid, SIGUSR1) == -1) {
+        int saved_errno = errno;
+        snprintf(message,
+                 message_size,
+                 "monitor could not be informed for report_id=%u: kill(SIGUSR1, %ld) failed: %s",
+                 report_id,
+                 parsed_pid,
+                 strerror(saved_errno));
+        return -1;
+    }
+
+    snprintf(message,
+             message_size,
+             "monitor informed for report_id=%u: sent SIGUSR1 to PID %ld",
+             report_id,
+             parsed_pid);
     return 0;
 }
 
@@ -388,6 +487,13 @@ int main(int argc, char **argv)
                 cm_error("report id must be a positive integer\n");
                 return 2;
             }
+        } else if (strcmp(argv[i], "--remove_district") == 0 ||
+                   strcmp(argv[i], "remove_district") == 0) {
+            if (set_command(&command, CMD_REMOVE_DISTRICT) == -1 ||
+                need_arg(argc, argv, i, "--remove_district") == -1) {
+                return 2;
+            }
+            district = argv[++i];
         } else if (strcmp(argv[i], "--set_threshold") == 0 ||
                    strcmp(argv[i], "--update_threshold") == 0) {
             if (set_command(&command, CMD_SET_THRESHOLD) == -1 ||
@@ -552,6 +658,23 @@ int main(int argc, char **argv)
     case CMD_ADD:
         result = add_report(district, &input, role_name(role), &created_id);
         if (result == 0) {
+            char monitor_message[256];
+            char monitor_log_action[320];
+
+            (void)notify_monitor_report_added(created_id,
+                                               monitor_message,
+                                               sizeof(monitor_message));
+            snprintf(monitor_log_action,
+                     sizeof(monitor_log_action),
+                     "monitor_notification %s",
+                     monitor_message);
+            if (append_district_log_message(district,
+                                            role_name(role),
+                                            declared_user,
+                                            monitor_log_action) == -1) {
+                cm_error("operation succeeded, but monitor notification status was not logged\n");
+            }
+            cm_writef(STDOUT_FILENO, "%s\n", monitor_message);
             snprintf(action, sizeof(action), "add report_id=%u", created_id);
         }
         break;
@@ -588,6 +711,12 @@ int main(int argc, char **argv)
             snprintf(action, sizeof(action), "metadata");
         }
         break;
+    case CMD_REMOVE_DISTRICT:
+        result = remove_district_tree(district);
+        if (result == 0) {
+            snprintf(action, sizeof(action), "remove_district");
+        }
+        break;
     case CMD_SET_THRESHOLD:
         result = write_severity_threshold(district, role_name(role), threshold);
         if (result == 0) {
@@ -608,6 +737,10 @@ int main(int argc, char **argv)
 
     if (result == -1) {
         return 1;
+    }
+
+    if (command == CMD_REMOVE_DISTRICT) {
+        return 0;
     }
 
     if (log_success(district, role, declared_user, action) == -1) {

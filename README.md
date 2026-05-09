@@ -19,10 +19,11 @@ Or build with `make`:
 make
 ```
 
-Both commands create the executable:
+Both commands create the executables:
 
 ```sh
 ./city_manager
+./monitor_reports
 ```
 
 Clean build output with:
@@ -51,7 +52,7 @@ The `--user` value is also stored as the inspector name when adding a report.
 ## Directory Layout
 
 Each district is stored in its own directory directly under the project folder.
-For example, adding a report to `downtown` creates:
+For example, the project folder may contain:
 
 ```text
 downtown/
@@ -60,6 +61,7 @@ downtown/
   latest_report -> reports.dat
   reports.dat
 active_reports-downtown -> downtown/reports.dat
+.monitor_pid
 ```
 
 File purposes:
@@ -70,6 +72,8 @@ File purposes:
 - `latest_report`: symlink inside the district pointing to `reports.dat`.
 - `active_reports-<district>`: root-level symlink pointing to the district
   report file.
+- `.monitor_pid`: hidden file created by `monitor_reports` while it is
+  running. It stores the monitor process ID for `city_manager` notifications.
 
 ## Permissions
 
@@ -160,6 +164,10 @@ All fields can also be passed directly:
 If the report severity is greater than or equal to the district threshold, the
 program prints an escalation alert.
 
+When a report is added, `city_manager` reads `.monitor_pid` and sends SIGUSR1
+to that process. It records either a successful monitor notification or an
+explicit "monitor could not be informed" message in `logged_district`.
+
 ### List Reports
 
 Both roles may list reports:
@@ -195,6 +203,36 @@ Only managers may remove reports:
 
 The implementation finds the matching fixed-size record, shifts all later
 records left, and truncates `reports.dat`.
+
+### Remove District
+
+Only managers may remove an entire district:
+
+```sh
+./city_manager --role manager --user alice --remove_district downtown
+```
+
+The command validates the district name, forks a child process, and the child
+executes:
+
+```sh
+rm -rf -- downtown
+```
+
+After the child exits successfully, `city_manager` unlinks the matching
+`active_reports-<district>` symlink.
+
+### Monitor Reports
+
+Start the monitor in the same directory as the district folders:
+
+```sh
+./monitor_reports
+```
+
+At startup it overwrites `.monitor_pid` with its process ID. It prints a
+message on standard output for each SIGUSR1 notification. It exits only after
+SIGINT, prints an exit message, and deletes `.monitor_pid`.
 
 ### Update Severity Threshold
 
@@ -321,6 +359,18 @@ Add a report without prompts:
   --description "Street light outage"
 ```
 
+Run the monitor in one terminal and add a report from another terminal:
+
+```sh
+./monitor_reports
+./city_manager --role manager --user alice --add downtown \
+  --lat 42.1 \
+  --lon 21.3 \
+  --category lighting \
+  --severity 2 \
+  --description "Street light outage"
+```
+
 Inspect generated files:
 
 ```sh
@@ -383,6 +433,11 @@ The project uses system-call-oriented APIs including:
 - `pwrite()`
 - `lseek()`
 - `ftruncate()`
+- `fork()`
+- `exec*()`
+- `waitpid()`
+- `kill()`
+- `sigaction()`
 - `fsync()`
 - `stat()`
 - `lstat()`
@@ -404,7 +459,7 @@ make clean
 Remove a test district and its root symlink:
 
 ```sh
-rm -rf downtown active_reports-downtown
+./city_manager --role manager --user alice --remove_district downtown
 ```
 
 Older test data from earlier versions may exist under `data/`. The current
@@ -417,4 +472,3 @@ The required AI usage notes are stored separately in:
 ```text
 ai_usage.md
 ```
-

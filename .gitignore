@@ -1,3 +1,6 @@
 city_manager
+monitor_reports
 *.o
+.monitor_pid
+active_reports-*
 data/
