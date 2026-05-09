@@ -2,3 +2,7 @@
 1777156056 alice manager add report_id=2
 1777156056 alice manager set_threshold threshold=2
 1777156056 alice manager list
+1778342967 audit manager list
+1778342984 phase2demo manager monitor_notification monitor could not be informed for report_id=3: cannot open .monitor_pid: No such file or directory
+1778342984 phase2demo manager add report_id=3
+1778343096 verify inspector list
